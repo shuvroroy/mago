@@ -86,13 +86,17 @@ dpkg-query -W valgrind libc6 libc6-dbg >> "$RESULTS_ROOT/environment.txt"
 setarch x86_64 --addr-no-randomize true
 
 # Fetch only these immutable public revisions, without stored credentials.
-git -C "$HARNESS_ROOT" fetch --no-tags \
-    https://github.com/carthage-software/mago.git "$BASE_SHA" "$ORIGINAL_SHA" "$CURRENT_SHA"
-# git archive is unsuitable here: this repository marks Rust files export-ignore.
-git clone --shared --no-checkout "$HARNESS_ROOT" "$SOURCE_ROOT"
-git -C "$HARNESS_ROOT" diff "$BASE_SHA" "$ORIGINAL_SHA" \
+git init "$SOURCE_ROOT"
+git -C "$SOURCE_ROOT" fetch --no-tags --depth=1 \
+    https://github.com/carthage-software/mago.git \
+    "$BASE_SHA:refs/heads/experiment-base" \
+    "$ORIGINAL_SHA:refs/heads/experiment-original" \
+    "$CURRENT_SHA:refs/heads/experiment-current"
+# Fetch full trees directly: the harness checkout is shallow, and git archive
+# excludes Rust files because this repository marks them export-ignore.
+git -C "$SOURCE_ROOT" diff "$BASE_SHA" "$ORIGINAL_SHA" \
     > "$RESULTS_ROOT/original-pr.patch"
-git -C "$HARNESS_ROOT" diff "$ORIGINAL_SHA" "$CURRENT_SHA" \
+git -C "$SOURCE_ROOT" diff "$ORIGINAL_SHA" "$CURRENT_SHA" \
     > "$RESULTS_ROOT/current-pr-update.patch"
 
 restore_source() {
