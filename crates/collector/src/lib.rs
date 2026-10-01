@@ -117,14 +117,14 @@ where
     /// Creates a new `Collector` from a slice of trivia.
     ///
     /// This is the primary constructor. It pre-parses the given trivia to find pragmas
-    /// relevant to the specified category. This is useful when the full program AST is not
+    /// relevant to the specified category. This is useful when the full program CST is not
     /// needed or available.
     ///
     /// # Parameters
     ///
     /// - `arena`: The memory arena for allocations.
     /// - `file`: The source file associated with this collector.
-    /// - `program`: The AST of the entire program, used to attach pragma scopes.
+    /// - `program`: The CST of the entire program, used to attach pragma scopes.
     /// - `categories`: The categories of pragmas to extract (e.g., "lint", "analysis").
     #[inline]
     pub fn new<'ast>(
@@ -578,7 +578,14 @@ where
                         scan += 1;
                     }
 
-                    return TextEdit::delete(TextRange::new(code_start as u32, scan as u32));
+                    let next_code = contents[scan..]
+                        .split(|byte| byte.is_ascii_whitespace() || *byte == b',')
+                        .next()
+                        .unwrap_or_default();
+                    let replacement =
+                        if next_code.contains(&b':') { String::new() } else { format!("{}:", pragma.category) };
+
+                    return TextEdit::replace(TextRange::new(code_start as u32, scan as u32), replacement);
                 }
                 b' ' | b'\t' => {
                     scan += 1;

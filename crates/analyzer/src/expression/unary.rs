@@ -561,7 +561,7 @@ fn report_ineffective_increment_or_decrement<A>(
 /// * `context` - The analysis context.
 /// * `block_context` - Mutable context for the current code block.
 /// * `artifacts` - Mutable store for analysis results.
-/// * `operand` - The expression AST node representing the operand to be incremented.
+/// * `operand` - The expression CST node representing the operand to be incremented.
 /// * `operation_span` - The span of the entire increment operation (e.g., `++$x` or `$x++`).
 ///
 /// # Returns
@@ -803,7 +803,7 @@ where
 /// * `context` - The analysis context.
 /// * `block_context` - Mutable context for the current code block.
 /// * `artifacts` - Mutable store for analysis results.
-/// * `operand` - The expression AST node representing the operand to be decremented.
+/// * `operand` - The expression CST node representing the operand to be decremented.
 /// * `operation_span` - The span of the entire decrement operation (e.g., `--$x` or `$x--`).
 ///
 /// # Returns
@@ -1953,6 +1953,19 @@ where
                     expression_span,
                 ) {
                     possibilities.extend(result?.types.to_vec());
+                } else if let TAtomic::GenericParameter(parameter) = t {
+                    possibilities.extend(
+                        cast_type_to_string(
+                            parameter.get_constraint(),
+                            operand_expression_id,
+                            context,
+                            block_context,
+                            artifacts,
+                            expression_span,
+                        )?
+                        .types
+                        .into_owned(),
+                    );
                 } else {
                     possibilities.push(TAtomic::Scalar(TScalar::string()));
                 }

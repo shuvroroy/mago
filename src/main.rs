@@ -21,7 +21,7 @@
 //! - `mago analyze`: Perform static analysis
 //! - `mago format`: Format PHP code
 //! - `mago guard`: Enforce architectural rules
-//! - `mago ast`: Display the abstract syntax tree
+//! - `mago cst`: Display the concrete syntax tree
 //! - `mago list-files`: List all files that would be processed
 //! - `mago self-update`: Update Mago to the latest version
 //! - `mago generate-completions`: Generate shell completion scripts
@@ -279,11 +279,12 @@ pub fn run(main_start: Instant) -> Result<ExitCode, Error> {
         MagoCommand::Config(cmd) => cmd.execute(configuration),
         MagoCommand::Extension(cmd) => cmd.execute(configuration),
         MagoCommand::ListFiles(cmd) => cmd.execute(configuration, arguments.colors),
-        MagoCommand::Lint(cmd) => cmd.execute(configuration, arguments.colors),
-        MagoCommand::Format(cmd) => cmd.execute(configuration, arguments.colors),
+        MagoCommand::Lint(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
+        MagoCommand::Format(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
+        MagoCommand::Fix(cmd) => cmd.execute(configuration, arguments.colors),
         MagoCommand::Cst(cmd) => cmd.execute(configuration, arguments.colors),
-        MagoCommand::Analyze(cmd) => cmd.execute(configuration, arguments.colors),
-        MagoCommand::Guard(cmd) => cmd.execute(configuration, arguments.colors),
+        MagoCommand::Analyze(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
+        MagoCommand::Guard(cmd) => cmd.execute(configuration, arguments.colors).map(|outcome| outcome.exit_code),
         MagoCommand::InspectBaseline(cmd) => cmd.execute(configuration, arguments.colors),
         MagoCommand::GenerateCompletions(cmd) => cmd.execute(),
         MagoCommand::SelfUpdate(_) => {
