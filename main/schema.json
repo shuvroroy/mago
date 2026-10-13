@@ -1024,7 +1024,8 @@
           "string-combination-threshold": 128,
           "integer-combination-threshold": 128,
           "array-combination-threshold": 32,
-          "loop-assignment-depth-threshold": 1
+          "loop-assignment-depth-threshold": 1,
+          "slow-file-warning-threshold-ms": 5000
         }
       }
     },
@@ -1040,6 +1041,7 @@
         "perimeter": {
           "layers": {},
           "layering": [],
+          "layering-reason": null,
           "rules": [],
           "restrictions": []
         },
@@ -8844,7 +8846,8 @@
             "string-combination-threshold": 128,
             "integer-combination-threshold": 128,
             "array-combination-threshold": 32,
-            "loop-assignment-depth-threshold": 1
+            "loop-assignment-depth-threshold": 1,
+            "slow-file-warning-threshold-ms": 5000
           }
         }
       },
@@ -8983,6 +8986,14 @@
           "minimum": 0,
           "maximum": 255,
           "default": 1
+        },
+        "slow-file-warning-threshold-ms": {
+          "description": "Duration in milliseconds after which analysis of a source file is reported as slow.\n\nThis only controls the warning threshold; it does not change analysis behavior.\n\nDefaults to `5000`.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 5000
         }
       },
       "additionalProperties": false
@@ -9025,6 +9036,7 @@
           "default": {
             "layers": {},
             "layering": [],
+            "layering-reason": null,
             "rules": [],
             "restrictions": []
           }
@@ -9078,6 +9090,14 @@
           },
           "default": []
         },
+        "layering-reason": {
+          "description": "A human-readable reason for layering breaches.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "rules": {
           "type": "array",
           "items": {
@@ -9111,6 +9131,14 @@
           "items": {
             "$ref": "#/$defs/PermittedDependency"
           }
+        },
+        "reason": {
+          "description": "A human-readable reason for this rule.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -9185,6 +9213,14 @@
             "$ref": "#/$defs/PermittedDependencyKind"
           },
           "default": []
+        },
+        "reason": {
+          "description": "A human-readable reason for this restriction.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
