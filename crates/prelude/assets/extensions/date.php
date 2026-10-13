@@ -145,7 +145,7 @@ function localtime(?int $timestamp = null, bool $associative = false): array {}
  *   0: int
  * }
  */
-function getdate(?int $timestamp): array {}
+function getdate(?int $timestamp = null): array {}
 
 function date_create(string $datetime = 'now', ?DateTimeZone $timezone = null): DateTime|false {}
 
@@ -703,9 +703,9 @@ class DateInterval
 
     public function format(string $format): string {}
 
-    public function __serialize(): array;
+    public function __serialize(): array {}
 
-    public function __unserialize(array $data): void;
+    public function __unserialize(array $data): void {}
 
     public function __wakeup(): void {}
 
@@ -773,9 +773,9 @@ class DatePeriod implements IteratorAggregate
 
     public function getRecurrences(): ?int {}
 
-    public function __serialize(): array;
+    public function __serialize(): array {}
 
-    public function __unserialize(array $data): void;
+    public function __unserialize(array $data): void {}
 
     public function __wakeup(): void {}
 

@@ -2,8 +2,10 @@ use mago_allocator::Arena;
 use mago_word::Word;
 use mago_word::word;
 
+use mago_codex::identifier::method::MethodIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
 use mago_codex::metadata::property::PropertyMetadata;
 use mago_codex::visibility::Visibility;
 use mago_php_version::PHPVersion;
@@ -20,6 +22,62 @@ use crate::resolver::property::DeclaredPropertyKind;
 use crate::resolver::property::resolve_declared_property;
 use mago_bytes::BytesDisplay;
 
+pub(crate) fn check_class_constant_visibility<A>(
+    context: &mut Context<'_, '_, A>,
+    block_context: &BlockContext<'_>,
+    class_metadata: &ClassLikeMetadata,
+    constant_metadata: &ClassLikeConstantMetadata,
+    access_span: Span,
+    member_span: Span,
+) where
+    A: Arena,
+{
+    let visibility = constant_metadata.visibility;
+    if visibility == Visibility::Public {
+        return;
+    }
+
+    let mut declaring_class = class_metadata;
+    let inherited_depth = if visibility == Visibility::Private { 0 } else { class_metadata.all_parent_classes.len() };
+    for _ in 0..inherited_depth {
+        let Some(parent_metadata) =
+            declaring_class.direct_parent_class.and_then(|parent| context.codebase.get_class_like(parent.as_bytes()))
+        else {
+            break;
+        };
+
+        if parent_metadata
+            .constants
+            .get(&constant_metadata.name)
+            .is_none_or(|constant| constant.span != constant_metadata.span)
+        {
+            break;
+        }
+
+        declaring_class = parent_metadata;
+    }
+
+    let calling_class = block_context.scope.get_class_like_name();
+    let is_visible =
+        is_visible_from_scope(context.codebase, visibility, declaring_class.name.as_bytes(), calling_class);
+    if !is_visible {
+        let constant_name = constant_metadata.name;
+        let class_name = declaring_class.original_name;
+
+        report_visibility_issue(
+            context,
+            calling_class,
+            IssueCode::InvalidConstantAccess,
+            format!("Cannot access {visibility} constant `{class_name}::{constant_name}`."),
+            visibility,
+            access_span,
+            Some(member_span),
+            Some(constant_metadata.span),
+            format!("Make `{constant_name}` public, or access it from an allowed class scope."),
+        );
+    }
+}
+
 /// Checks if a method is visible from the current scope and reports a detailed
 /// error if it is not.
 ///
@@ -27,8 +85,7 @@ use mago_bytes::BytesDisplay;
 ///
 /// * `context` - The global analysis context.
 /// * `calling_class` - The class the access occurs in, or `None` for the global scope.
-/// * `fqcn` - The fully-qualified class name on which the method is being called.
-/// * `method_name` - The method name.
+/// * `method_id` - The class and method on which the call occurs.
 /// * `access_span` - The span of the entire method call/access expression (e.g., `$obj->method()`).
 /// * `method_name_span` - The span of just the method name identifier (e.g., `method`).
 ///
@@ -36,25 +93,22 @@ use mago_bytes::BytesDisplay;
 ///
 /// `true` if the method is visible, `false` otherwise. An error is reported to the
 /// context buffer if the method is not visible.
-pub fn check_method_visibility<A>(
+pub(crate) fn check_method_visibility_by_id<A>(
     context: &mut Context<'_, '_, A>,
     calling_class: Option<Word>,
-    fqcn: &[u8],
-    method_name: &[u8],
+    method_id: &MethodIdentifier,
     access_span: Span,
     member_span: Option<Span>,
 ) -> bool
 where
     A: Arena,
 {
-    let declaring_class = context.codebase.get_declaring_method_class(fqcn, method_name).unwrap_or_else(|| word(fqcn));
-
-    let Some(method_metadata) = context.codebase.get_declaring_method(fqcn, method_name) else {
-        return true;
-    };
-
+    let lookup_id = MethodIdentifier::new(
+        method_id.get_class_name().to_ascii_lowercase(),
+        method_id.get_method_name().to_ascii_lowercase(),
+    );
     // Get the effective visibility, checking trait alias visibility overrides
-    let Some(visibility) = context.codebase.get_method_visibility(fqcn, method_name) else {
+    let Some(visibility) = context.codebase.get_method_visibility_by_id(&lookup_id) else {
         return true;
     };
 
@@ -62,18 +116,29 @@ where
         return true;
     }
 
+    let Some(method_metadata) = context.codebase.get_declaring_method_by_id(&lookup_id) else {
+        return true;
+    };
+
+    let declaring_class =
+        context.codebase.get_declaring_method_class_by_id(&lookup_id).unwrap_or_else(|| method_id.get_class_name());
     let is_visible = is_visible_from_scope(context.codebase, visibility, declaring_class.as_bytes(), calling_class);
     if !is_visible {
         let declaring_class_name = context
             .codebase
-            .get_class_like(declaring_class.as_bytes())
+            .get_class_like_by_name(declaring_class)
             .map_or_else(|| declaring_class, |metadata| metadata.original_name);
 
-        let issue_title =
-            format!("Cannot access {} method `{}::{}`.", visibility, declaring_class_name, BytesDisplay(method_name));
+        let method_name = method_id.get_method_name();
+        let issue_title = format!(
+            "Cannot access {} method `{}::{}`.",
+            visibility,
+            declaring_class_name,
+            BytesDisplay(method_name.as_bytes())
+        );
         let help_text = format!(
             "Change the visibility of method `{}` to `public`, or call it from an allowed scope.",
-            BytesDisplay(method_name)
+            BytesDisplay(method_name.as_bytes())
         );
 
         report_visibility_issue(
@@ -96,28 +161,32 @@ where
 ///
 /// Returns `true` when the method is visible (or when visibility cannot be determined), and
 /// `false` only when the method definitively exists but is inaccessible from the current scope.
-pub fn is_method_visible<'ctx, A>(
+pub(crate) fn is_method_visible_by_id<'ctx, A>(
     context: &Context<'ctx, '_, A>,
     block_context: &BlockContext<'ctx>,
-    fqcn: &[u8],
-    method_name: &[u8],
+    method_id: &MethodIdentifier,
 ) -> bool
 where
     A: Arena,
 {
-    let declaring_class = context.codebase.get_declaring_method_class(fqcn, method_name).unwrap_or_else(|| word(fqcn));
-
-    if context.codebase.get_declaring_method(fqcn, method_name).is_none() {
-        return true;
-    }
-
-    let Some(visibility) = context.codebase.get_method_visibility(fqcn, method_name) else {
+    let lookup_id = MethodIdentifier::new(
+        method_id.get_class_name().to_ascii_lowercase(),
+        method_id.get_method_name().to_ascii_lowercase(),
+    );
+    let Some(visibility) = context.codebase.get_method_visibility_by_id(&lookup_id) else {
         return true;
     };
 
     if visibility == Visibility::Public {
         return true;
     }
+
+    if context.codebase.get_declaring_method_by_id(&lookup_id).is_none() {
+        return true;
+    }
+
+    let declaring_class =
+        context.codebase.get_declaring_method_class_by_id(&lookup_id).unwrap_or_else(|| method_id.get_class_name());
 
     is_visible_from_scope(
         context.codebase,

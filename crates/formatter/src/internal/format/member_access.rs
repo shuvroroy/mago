@@ -27,12 +27,14 @@ use crate::document::Group;
 use crate::document::IndentIfBreak;
 use crate::document::Line;
 use crate::internal::FormatterState;
+use crate::internal::MemberAccessChainContext;
 use crate::internal::format::Format;
 use crate::internal::format::call_arguments::print_argument_list;
 use crate::internal::format::call_arguments::promote_argument_list_to_partial;
 use crate::internal::format::call_arguments::should_break_all_arguments;
 use crate::internal::format::misc;
 use crate::internal::format::misc::is_breaking_expression;
+use crate::internal::format::misc::is_expandable_expression;
 use crate::internal::format::misc::is_simple_call_argument;
 use crate::internal::format::misc::is_simple_expression;
 use crate::internal::format::misc::is_string_word_type;
@@ -125,6 +127,12 @@ where
         let mut score: i32 = 0;
         let mut account_for_simple_calls = true;
         let mut always_account_for_simple_calls = false;
+        let is_breaking_argument = |expression, arrow_function_recursion| {
+            (!f.settings.preserve_breaking_argument_list
+                || !matches!(unwrap_parenthesized(expression), Expression::Call(_) | Expression::Instantiation(_))
+                || is_expandable_expression(expression, false))
+                && is_breaking_expression(f, expression, arrow_function_recursion)
+        };
 
         match self.base {
             Expression::Instantiation(instantiation) => {
@@ -144,7 +152,7 @@ where
                         Some(argument_list) => !argument_list
                             .arguments
                             .iter()
-                            .any(|argument| is_breaking_expression(f, argument.value(), false)),
+                            .any(|argument| is_breaking_argument(argument.value(), false)),
                         None => true,
                     });
 
@@ -157,7 +165,7 @@ where
             {
                 let (is_breaking_argument, is_string_word_type) = match argument_list.arguments.first() {
                     Some(argument) => {
-                        (is_breaking_expression(f, argument.value(), true), is_string_word_type(argument.value()))
+                        (is_breaking_argument(argument.value(), true), is_string_word_type(argument.value()))
                     }
                     None => (false, false),
                 };
@@ -209,10 +217,10 @@ where
             }
 
             let breaking_arguments = if argument_list.arguments.len() == 1 {
-                argument_list.arguments.first().map(Argument::value).is_some_and(|e| is_breaking_expression(f, e, true))
+                argument_list.arguments.first().map(Argument::value).is_some_and(|e| is_breaking_argument(e, true))
             } else {
                 argument_list.arguments.iter().all(|arg| !arg.is_positional())
-                    && argument_list.arguments.iter().any(|arg| is_breaking_expression(f, arg.value(), false))
+                    && argument_list.arguments.iter().any(|arg| is_breaking_argument(arg.value(), false))
             };
 
             if breaking_arguments {
@@ -472,6 +480,38 @@ where
         })
     }
 
+    #[inline]
+    fn has_comments_requiring_hard_break(&self, f: &FormatterState<'_, '_, A>) -> bool {
+        let comment_requires_hard_break = |start: Position, end: Position| {
+            f.all_comments()[f.get_next_comment_index()..]
+                .iter()
+                .take_while(|comment| comment.span.start.offset <= end.offset)
+                .any(|comment| {
+                    let span = comment.span;
+                    if span.start.offset < start.offset || span.end.offset > end.offset {
+                        return false;
+                    }
+
+                    if !comment.kind.is_block_comment() {
+                        return true;
+                    }
+
+                    let comment_start_line = f.file.line_number(span.start.offset);
+
+                    f.file.line_number(span.end.offset) != comment_start_line
+                        || f.file.line_number(start.offset) != comment_start_line
+                })
+        };
+
+        self.link_gaps().any(|(start, end)| comment_requires_hard_break(start, end))
+            || self.accesses.iter().skip(1).any(|access| {
+                comment_requires_hard_break(
+                    access.get_operator_span().end_position(),
+                    access.get_selector().span().start_position(),
+                )
+            })
+    }
+
     /// Checks if any method call in the chain has arguments that will force the chain to break.
     #[inline]
     fn has_breaking_arguments(&self) -> bool {
@@ -495,7 +535,10 @@ where
             return true;
         }
 
-        if self.has_comments_in_chain(f) && self.is_already_broken(f) {
+        // Line, multi-line, and own-line block comments need a stable hard-break decision.
+        // Otherwise, collapsing an unrelated link can make a short chain appear unbroken and
+        // move an intermediate trailing comment to the end of the chain on the next pass.
+        if self.has_comments_requiring_hard_break(f) {
             return true;
         }
 
@@ -831,7 +874,9 @@ where
     }
 
     let chain_owns_parens = match chain_base_frame {
-        ChainBaseFrame::BaseHandlesParens => false,
+        ChainBaseFrame::BaseHandlesParens => {
+            matches!(member_access_chain.base, Expression::Instantiation(i) if f.instantiation_needs_parens(i))
+        }
         ChainBaseFrame::None | ChainBaseFrame::ChainHandlesParens => base_needs_parens(f, member_access_chain.base),
     };
 
@@ -918,12 +963,13 @@ where
     }
 
     let should_break = must_break || member_access_chain.has_breaking_arguments();
-    if should_break && !matches!(f.parent_node(), Node::Binary(_)) {
+    if should_break && (!matches!(f.parent_node(), Node::Binary(_)) || f.settings.preserve_breaking_member_access_chain)
+    {
         parts.push(Document::BreakParent);
     }
 
-    if matches!(f.parent_node(), Node::ExpressionStatement(_) | Node::Assignment(_) | Node::Return(_)) {
-        f.set_member_access_chain_group_id(group_id);
+    if f.terminates_statement_from_parent() {
+        f.set_member_access_chain_context(MemberAccessChainContext { group_id, must_break });
     }
 
     // Wrap everything in a group to manage line breaking
@@ -988,7 +1034,9 @@ where
     let preserve_same_line_first_method = f.settings.preserve_breaking_member_access_chain
         && f.settings.preserve_breaking_member_access_chain_first_method_on_same_line
         && member_access_chain.is_first_link_object_method_call()
-        && (member_access_chain.is_first_link_already_broken(f)
+        // A lone broken call has no later links to keep broken after inlining it.
+        // Moving it back onto the receiver's line can make the next pass break it again.
+        && ((member_access_chain.accesses.len() > 1 && member_access_chain.is_first_link_already_broken(f))
             || member_access_chain.has_break_after_first_access(f)
             || member_access_chain.exceeds_print_width_from_line_start(f));
 

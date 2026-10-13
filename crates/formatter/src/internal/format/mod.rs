@@ -54,6 +54,7 @@ use mago_syntax::cst::Modifier;
 use mago_syntax::cst::Namespace;
 use mago_syntax::cst::NamespaceBody;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::OpeningTag;
 use mago_syntax::cst::PlainProperty;
 use mago_syntax::cst::Program;
@@ -247,6 +248,7 @@ where
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
         let was_in_script_terminating_statement = f.in_script_terminating_statement;
+        let capture = f.begin_range(self.span(), NodeKind::Statement);
 
         f.in_script_terminating_statement = !self.is_closing_tag() && self.terminates_scripting();
 
@@ -292,7 +294,7 @@ where
 
         f.in_script_terminating_statement = was_in_script_terminating_statement;
 
-        result
+        f.end_range(capture, result)
     }
 }
 
@@ -1237,21 +1239,19 @@ where
         wrap!(f, self, ExpressionStatement, {
             let expression = self.expression.format(f);
             let terminator = self.terminator.format(f);
-            if let Some(chain_group_id) = f.take_member_access_chain_group_id()
+
+            if let Some(chain) = f.take_member_access_chain_context()
                 && f.settings.method_chain_semicolon_on_next_line
             {
                 let semicolon = member_chain_dangling_semicolon(f, &self.terminator);
 
                 Document::Array(vec_in![f.arena;
                     expression,
-                    Document::IfBreak(
-                        IfBreak::new(
-                            f.arena,
-                            semicolon,
-                            terminator,
-                        )
-                        .with_id(chain_group_id),
-                    ),
+                    if chain.must_break {
+                        semicolon
+                    } else {
+                        Document::IfBreak(IfBreak::new(f.arena, semicolon, terminator).with_id(chain.group_id))
+                    },
                 ])
             } else {
                 Document::Array(vec_in![f.arena; expression, terminator])
@@ -1291,7 +1291,8 @@ where
     A: Arena,
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
-        wrap!(f, self, ClassLikeMember, {
+        let capture = f.begin_range(self.span(), NodeKind::ClassLikeMember);
+        let document = wrap!(f, self, ClassLikeMember, {
             match self {
                 ClassLikeMember::TraitUse(m) => m.format(f),
                 ClassLikeMember::Constant(m) => m.format(f),
@@ -1299,7 +1300,9 @@ where
                 ClassLikeMember::EnumCase(m) => m.format(f),
                 ClassLikeMember::Method(m) => m.format(f),
             }
-        })
+        });
+
+        f.end_range(capture, document)
     }
 }
 
@@ -1463,13 +1466,18 @@ where
 
             let terminator = self.terminator.format(f);
 
-            if let Some(chain_group_id) = f.take_member_access_chain_group_id()
+            if let Some(chain) = f.take_member_access_chain_context()
                 && f.settings.method_chain_semicolon_on_next_line
             {
                 let semicolon = member_chain_dangling_semicolon(f, &self.terminator);
-                contents.push(Document::IfBreak(IfBreak::new(f.arena, semicolon, terminator).with_id(chain_group_id)));
 
-                Document::Group(Group::new(contents).with_id(chain_group_id))
+                contents.push(if chain.must_break {
+                    semicolon
+                } else {
+                    Document::IfBreak(IfBreak::new(f.arena, semicolon, terminator).with_id(chain.group_id))
+                });
+
+                Document::Group(Group::new(contents).with_id(chain.group_id))
             } else {
                 contents.push(terminator);
 
@@ -1494,21 +1502,33 @@ where
 {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena, A>) -> Document<'arena, A> {
         wrap!(f, self, Echo, {
-            let echo_keyword = self.echo.format(f);
+            // A single expandable value owns its continuation indentation. Breaking
+            // its arguments must not also break between `echo` and the value.
+            let hugging_value = self.values.first().filter(|value| {
+                self.values.len() == 1
+                    && misc::is_expandable_expression(value, true)
+                    && !f.has_leading_own_line_comment(value.span())
+                    && !f.has_same_line_trailing_comment(self.echo.span())
+            });
+            let mut contents = vec_in![f.arena; self.echo.format(f)];
 
-            let values_group_id = f.next_id();
-            let values_group = Document::Group(
-                Group::new(Document::join(f.arena, self.values.iter().map(|v| v.format(f)), Separator::CommaLine))
-                    .with_id(values_group_id),
-            );
-
-            let mut contents = vec_in![f.arena;
-                echo_keyword,
-                Document::IndentIfBreak(IndentIfBreak::new(values_group_id, vec_in![f.arena;
-                    Document::Line(Line::default()),
-                    values_group
-                ])),
-            ];
+            if let Some(value) = hugging_value {
+                contents.push(Document::space());
+                contents.push(value.format(f));
+            } else {
+                let values_group_id = f.next_id();
+                let values_group = Document::Group(
+                    Group::new(Document::join(f.arena, self.values.iter().map(|v| v.format(f)), Separator::CommaLine))
+                        .with_id(values_group_id),
+                );
+                contents.push(Document::IndentIfBreak(IndentIfBreak::new(
+                    values_group_id,
+                    vec_in![f.arena;
+                        Document::Line(Line::default()),
+                        values_group,
+                    ],
+                )));
+            }
 
             // A closing tag terminates the statement *and* leaves PHP mode, so it reads as the end
             // of the block and gets its own line; a semicolon belongs to the last value.
@@ -2006,20 +2026,22 @@ where
                 contents.push(Document::space());
             }
 
-            if self.ampersand.is_some() {
-                contents.push(Document::String(b"&"));
-            }
-
-            if self.ellipsis.is_some() {
-                contents.push(Document::String(b"..."));
-            }
-
+            // The alignment padding goes before `&` / `...` so that they stay attached to the
+            // variable name (PSR-12: no space between the variadic operator and the argument name).
             if let (Some(padding), Some(list_id)) =
                 (f.parameter_state.variable_padding, f.parameter_state.list_group_id)
                 && padding > 0
             {
                 let spaces = Document::String(utils::spaces(f.arena, padding));
                 contents.push(Document::IfBreak(IfBreak::new(f.arena, spaces, Document::empty()).with_id(list_id)));
+            }
+
+            if self.ampersand.is_some() {
+                contents.push(Document::String(b"&"));
+            }
+
+            if self.ellipsis.is_some() {
+                contents.push(Document::String(b"..."));
             }
 
             contents.push(self.variable.format(f));

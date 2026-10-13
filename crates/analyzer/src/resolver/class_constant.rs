@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use mago_word::Word;
 
 use mago_codex::metadata::class_like::ClassLikeMetadata;
+use mago_codex::metadata::class_like_constant::ClassLikeConstantMetadata;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
@@ -24,6 +25,8 @@ use mago_syntax::cst::ClassLikeConstantSelector;
 use mago_syntax::cst::Expression;
 
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::editor::MemberKind;
+use crate::artifacts::editor::MemberReference;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
@@ -34,12 +37,14 @@ use crate::resolver::class_name::resolve_classnames_from_expression;
 use crate::resolver::selector::ResolvedSelector;
 use crate::resolver::selector::resolve_constant_selector;
 use crate::utils::names::display_class_like_name;
+use crate::visibility::check_class_constant_visibility;
 
 /// Represents a successfully resolved class constant or enum case.
 #[derive(Debug)]
 pub struct ResolvedConstant {
     /// The type of the constant's value or the enum case itself.
     pub const_type: TUnion,
+    pub declaration: Option<(MemberKind, Span)>,
 }
 
 /// Holds the results of a constant resolution attempt.
@@ -66,6 +71,7 @@ where
     A: Arena,
 {
     let mut result = ConstantResolutionResult::default();
+    let mut references = artifacts.editor.as_ref().map(|_| Vec::new());
 
     // 1. Resolve all possible class names from the expression.
     let classnames =
@@ -90,15 +96,10 @@ where
             if let ResolvedSelector::Identifier(const_name) = selector_resolution
                 && const_name.as_bytes().eq_ignore_ascii_case(b"class")
             {
-                if let Some(const_type) = handle_class_magic_constant(
-                    context,
-                    block_context,
-                    artifacts,
-                    class_resolution,
-                    class_expr,
-                    constant_selector,
-                ) {
-                    result.constants.push(ResolvedConstant { const_type });
+                if let Some(const_type) =
+                    handle_class_magic_constant(context, artifacts, class_resolution, class_expr, constant_selector)
+                {
+                    result.constants.push(ResolvedConstant { const_type, declaration: None });
                 } else {
                     result.has_invalid_path = true;
                 }
@@ -144,13 +145,29 @@ where
 
             if let Some(resolved_const) = find_constant_in_class(
                 context,
+                block_context,
                 metadata,
                 const_name,
                 class_expr.span(),
                 constant_selector.span(),
                 &class_resolution.origin,
-                block_context.flags.inside_class_like_attribute(),
             ) {
+                if let Some(references) = &mut references {
+                    let mut reference = MemberReference::property(
+                        block_context.scope.get_reference_origin(),
+                        class_expr.span(),
+                        constant_selector.span(),
+                        const_name,
+                    );
+
+                    reference.kind = resolved_const.declaration.map_or(MemberKind::ClassConstant, |(kind, _)| kind);
+                    reference.declaration = resolved_const.declaration.map(|(_, span)| span);
+                    reference.lookup_class = Some(fq_class_id);
+                    reference.static_access = true;
+                    reference.dynamic = !matches!(constant_selector, ClassLikeConstantSelector::Identifier(_));
+                    reference.uncertain = reference.declaration.is_none();
+                    references.push(reference);
+                }
                 result.constants.push(resolved_const);
             } else {
                 result.has_invalid_path = true;
@@ -158,14 +175,20 @@ where
         }
     }
 
+    if let Some(editor) = &mut artifacts.editor {
+        editor.members.extend(references.into_iter().flatten().map(|mut reference| {
+            reference.uncertain |= result.has_ambiguous_path || result.has_invalid_path;
+            reference
+        }));
+    }
+
     Ok(result)
 }
 
 /// Specific handler for the `::class` magic constant.
-fn handle_class_magic_constant<'ctx, 'ast, 'arena, A>(
-    context: &mut Context<'ctx, 'arena, A>,
-    block_context: &BlockContext<'ctx>,
-    artifacts: &mut AnalysisArtifacts,
+fn handle_class_magic_constant<'ast, 'arena, A>(
+    context: &mut Context<'_, 'arena, A>,
+    artifacts: &AnalysisArtifacts,
     class_resolution: &ResolvedClassname,
     class_expr: &'ast Expression<'arena>,
     selector: &'ast ClassLikeConstantSelector<'arena>,
@@ -226,8 +249,6 @@ where
                 report_non_existent_class(context, fq_class_id, class_expr.span());
             }
 
-            artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, fq_class_id, false);
-
             if let Some(generic_class_string) = generic_class_string {
                 return Some(generic_class_string);
             }
@@ -283,16 +304,17 @@ fn is_valid_trait_constant_access(origin: &ResolutionOrigin, inside_class_like_a
 /// Finds a constant or enum case by name within a class.
 fn find_constant_in_class<'ctx, A>(
     context: &mut Context<'ctx, '_, A>,
+    block_context: &BlockContext<'ctx>,
     metadata: &'ctx ClassLikeMetadata,
     const_name: Word,
     class_span: Span,
     const_span: Span,
     resolution_origin: &ResolutionOrigin,
-    inside_class_like_attribute: bool,
 ) -> Option<ResolvedConstant>
 where
     A: Arena,
 {
+    let inside_class_like_attribute = block_context.flags.inside_class_like_attribute();
     if metadata.kind.is_trait() && !is_valid_trait_constant_access(resolution_origin, inside_class_like_attribute) {
         let trait_name = metadata.original_name;
 
@@ -319,6 +341,19 @@ where
 
     // Check for a defined constant
     if let Some(constant_metadata) = metadata.constants.get(&const_name) {
+        if !block_context.is_enclosing_scope_deprecated() {
+            report_deprecated_class_constant(context, metadata, constant_metadata, const_span);
+        }
+
+        check_class_constant_visibility(
+            context,
+            block_context,
+            metadata,
+            constant_metadata,
+            class_span.join(const_span),
+            const_span,
+        );
+
         let display = format!("{}::{}", metadata.original_name, const_name);
         crate::utils::availability::check_class_constant_availability(context, constant_metadata, &display, const_span);
 
@@ -349,7 +384,10 @@ where
             },
         );
 
-        return Some(ResolvedConstant { const_type });
+        return Some(ResolvedConstant {
+            const_type,
+            declaration: Some((MemberKind::ClassConstant, constant_metadata.span.subspan(0, const_name.len() as u32))),
+        });
     }
 
     // Check for an enum case
@@ -362,7 +400,10 @@ where
         let const_type =
             TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(metadata.original_name, const_name))));
 
-        return Some(ResolvedConstant { const_type });
+        return Some(ResolvedConstant {
+            const_type,
+            declaration: Some((MemberKind::EnumCase, enum_case_metadata.name_span)),
+        });
     }
 
     for required_class in metadata.require_extends.iter().chain(metadata.require_implements.iter()) {
@@ -371,6 +412,19 @@ where
         };
 
         if let Some(constant_metadata) = required_metadata.constants.get(&const_name) {
+            if !block_context.is_enclosing_scope_deprecated() {
+                report_deprecated_class_constant(context, required_metadata, constant_metadata, const_span);
+            }
+
+            check_class_constant_visibility(
+                context,
+                block_context,
+                required_metadata,
+                constant_metadata,
+                class_span.join(const_span),
+                const_span,
+            );
+
             let mut const_type = if let Some(type_metadata) = &constant_metadata.type_metadata
                 && type_metadata.from_docblock
             {
@@ -395,26 +449,58 @@ where
                 },
             );
 
-            return Some(ResolvedConstant { const_type });
+            return Some(ResolvedConstant {
+                const_type,
+                declaration: Some((
+                    MemberKind::ClassConstant,
+                    constant_metadata.span.subspan(0, const_name.len() as u32),
+                )),
+            });
         }
 
-        if required_metadata.kind.is_enum() && required_metadata.enum_cases.contains_key(&const_name) {
+        if required_metadata.kind.is_enum()
+            && let Some(enum_case) = required_metadata.enum_cases.get(&const_name)
+        {
             let const_type = TUnion::from_atomic(TAtomic::Object(TObject::Enum(TEnum::new_case(
                 required_metadata.original_name,
                 const_name,
             ))));
 
-            return Some(ResolvedConstant { const_type });
+            return Some(ResolvedConstant {
+                const_type,
+                declaration: Some((MemberKind::EnumCase, enum_case.name_span)),
+            });
         }
     }
 
     if metadata.has_incomplete_hierarchy() {
-        return Some(ResolvedConstant { const_type: get_mixed() });
+        return Some(ResolvedConstant { const_type: get_mixed(), declaration: None });
     }
 
     // Not found, report error.
     report_non_existent_constant(context, metadata, const_name, class_span, const_span);
     None
+}
+
+fn report_deprecated_class_constant<A>(
+    context: &mut Context<'_, '_, A>,
+    class_metadata: &ClassLikeMetadata,
+    constant_metadata: &ClassLikeConstantMetadata,
+    span: Span,
+) where
+    A: Arena,
+{
+    if !constant_metadata.flags.is_deprecated() {
+        return;
+    }
+
+    let name = format!("{}::{}", class_metadata.original_name, constant_metadata.name);
+    context.collector.report_with_code(
+        IssueCode::DeprecatedClassConstant,
+        Issue::warning(format!("Use of deprecated class constant `{name}`."))
+            .with_annotation(Annotation::primary(span).with_message("This class constant is deprecated"))
+            .with_help(format!("Check the documentation for `{name}` for a replacement.")),
+    );
 }
 
 /// Reports an error for a class-like that cannot be found in the codebase.

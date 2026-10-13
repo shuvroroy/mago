@@ -1,6 +1,9 @@
+use std::cell::Cell;
+
 use mago_allocator::Arena;
 use mago_allocator::CollectIn;
 use mago_allocator::vec::Vec as BumpVec;
+use mago_allocator::vec_in;
 use mago_database::file::File;
 use mago_database::file::FileId;
 use mago_database::file::HasFileId;
@@ -8,9 +11,11 @@ use mago_php_version::PHPVersion;
 use mago_php_version::feature::Feature;
 use mago_span::Span;
 use mago_syntax::cst::Node;
+use mago_syntax::cst::NodeKind;
 use mago_syntax::cst::Program;
 use mago_syntax::cst::Trivia;
 
+use crate::document::Document;
 use crate::document::group::GroupIdentifier;
 use crate::document::group::GroupIdentifierBuilder;
 use crate::internal::comment::placement::Comments;
@@ -105,6 +110,16 @@ where
     (regions.leak(), next_markers.leak())
 }
 
+/// Context about a formatted member access chain that terminates an expression statement,
+/// an assignment or a return statement.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberAccessChainContext {
+    /// The identifier of the group wrapping the chain, for `IfBreak` resolution.
+    pub(crate) group_id: GroupIdentifier,
+    /// Whether the chain is guaranteed to be printed across multiple lines.
+    pub(crate) must_break: bool,
+}
+
 #[derive(Debug)]
 pub struct FormatterState<'ctx, 'arena, A>
 where
@@ -128,13 +143,22 @@ where
     parameter_state: ParameterState,
     in_script_terminating_statement: bool,
     in_condition: bool,
-    must_break_condition: bool,
+    condition_group_id: Option<GroupIdentifier>,
     is_wrapped_in_parens: bool,
     is_in_inlined_binary_chain: bool,
     is_in_aligned_assignment_rhs: bool,
     halted_compilation: bool,
     alignment_context: Option<AssignmentAlignment>,
-    member_access_chain_group_id: Option<GroupIdentifier>,
+    member_access_chain_context: Option<MemberAccessChainContext>,
+    range: Option<RangeState>,
+}
+
+#[derive(Debug)]
+struct RangeState {
+    span: Span,
+    kind: NodeKind,
+    active: Cell<bool>,
+    source: Cell<(u32, u32)>,
 }
 
 impl<'ctx, 'arena, A> FormatterState<'ctx, 'arena, A>
@@ -179,15 +203,51 @@ where
             argument_state: ArgumentState::default(),
             parameter_state: ParameterState::default(),
             in_condition: false,
-            must_break_condition: false,
+            condition_group_id: None,
             is_wrapped_in_parens: false,
             is_in_inlined_binary_chain: false,
             is_in_aligned_assignment_rhs: false,
             halted_compilation: false,
             in_script_terminating_statement: false,
             alignment_context: None,
-            member_access_chain_group_id: None,
+            member_access_chain_context: None,
+            range: None,
         }
+    }
+
+    pub(crate) fn set_range(&mut self, span: Span, kind: NodeKind) {
+        self.range = Some(RangeState {
+            span,
+            kind,
+            active: Cell::new(false),
+            source: Cell::new((span.start.offset, span.end.offset)),
+        });
+    }
+
+    pub(crate) fn range_source(&self) -> Option<(u32, u32)> {
+        self.range.as_ref().map(|range| range.source.get())
+    }
+
+    pub(crate) fn begin_range(&self, span: Span, kind: NodeKind) -> bool {
+        let Some(range) = &self.range else { return false };
+        if range.span != span || range.kind != kind || range.active.get() {
+            return false;
+        }
+
+        range.active.set(true);
+        true
+    }
+
+    pub(crate) fn end_range(&self, capture: bool, document: Document<'arena, A>) -> Document<'arena, A> {
+        if !capture {
+            return document;
+        }
+
+        if let Some(range) = &self.range {
+            range.active.set(false);
+        }
+
+        Document::Array(vec_in![self.arena; Document::RangeStart, document, Document::RangeEnd])
     }
 
     /// Get the current alignment context.
@@ -229,20 +289,25 @@ where
         self.all_comments
     }
 
-    /// Take the member access chain group ID, resetting it to None.
+    /// Take the member access chain context, resetting it to `None`.
     #[inline]
-    pub(crate) fn take_member_access_chain_group_id(&mut self) -> Option<GroupIdentifier> {
-        self.member_access_chain_group_id.take()
+    pub(crate) fn take_member_access_chain_context(&mut self) -> Option<MemberAccessChainContext> {
+        self.member_access_chain_context.take()
     }
 
-    /// Set the member access chain group ID.
+    /// Set the member access chain context.
     #[inline]
-    pub(crate) fn set_member_access_chain_group_id(&mut self, id: GroupIdentifier) {
-        self.member_access_chain_group_id = Some(id);
+    pub(crate) fn set_member_access_chain_context(&mut self, context: MemberAccessChainContext) {
+        self.member_access_chain_context = Some(context);
     }
 
     fn next_id(&mut self) -> GroupIdentifier {
         self.id_builder.next_id()
+    }
+
+    #[inline]
+    fn needs_comment_span(&self) -> bool {
+        self.next_comment_index != self.all_comments.len() || self.placed_comments.has_placed_comments()
     }
 
     #[inline]
@@ -284,6 +349,29 @@ where
         let len = self.stack.len();
 
         (len > n).then(|| self.stack[len - n - 1])
+    }
+
+    /// Walks up from the immediate parent through expression nodes that never own a
+    /// statement terminator (parentheses, unary operators/casts, binary operations) to
+    /// determine whether this node terminates an expression statement, an assignment
+    /// or a return statement.
+    ///
+    /// For example, in `return $this->foo()->bar() > 0;` the member access chain does
+    /// not have the return statement as its direct parent, but this still returns
+    /// `true`.
+    #[inline]
+    pub(crate) fn terminates_statement_from_parent(&self) -> bool {
+        let len = self.stack.len();
+
+        for i in (0..len.saturating_sub(1)).rev() {
+            match &self.stack[i] {
+                Node::ExpressionStatement(_) | Node::Assignment(_) | Node::Return(_) => return true,
+                Node::Expression(_) | Node::Binary(_) | Node::Parenthesized(_) | Node::UnaryPrefix(_) => {}
+                _ => return false,
+            }
+        }
+
+        false
     }
 
     #[inline]
