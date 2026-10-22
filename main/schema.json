@@ -893,6 +893,10 @@
             "enabled": false,
             "level": "Help"
           },
+          "prefer-self": {
+            "enabled": false,
+            "level": "Help"
+          },
           "switch-continue-to-break": {
             "enabled": false,
             "level": "Warning"
@@ -993,11 +997,13 @@
         "memoize-properties": true,
         "allow-possibly-undefined-array-keys": true,
         "check-throws": false,
+        "check-dead-catch": false,
         "unchecked-exceptions": [],
         "unchecked-exception-classes": [],
         "strict-list-index-checks": false,
         "strict-array-index-existence": false,
         "allow-array-truthy-operand": false,
+        "allow-operator-overloading": false,
         "no-boolean-literal-comparison": false,
         "check-missing-type-hints": false,
         "check-closure-missing-type-hints": false,
@@ -2081,6 +2087,10 @@
               "level": "Help"
             },
             "prefer-self-return-type": {
+              "enabled": false,
+              "level": "Help"
+            },
+            "prefer-self": {
               "enabled": false,
               "level": "Help"
             },
@@ -3507,64 +3517,71 @@
             "level": "Help"
           }
         },
-        "switch-continue-to-break": {
+        "prefer-self": {
           "$ref": "#/$defs/RuleSettings181",
+          "default": {
+            "enabled": false,
+            "level": "Help"
+          }
+        },
+        "switch-continue-to-break": {
+          "$ref": "#/$defs/RuleSettings182",
           "default": {
             "enabled": false,
             "level": "Warning"
           }
         },
         "no-null-property-init": {
-          "$ref": "#/$defs/RuleSettings182",
+          "$ref": "#/$defs/RuleSettings183",
           "default": {
             "enabled": false,
             "level": "Help"
           }
         },
         "use-wp-functions": {
-          "$ref": "#/$defs/RuleSettings183",
-          "default": {
-            "enabled": true,
-            "level": "Warning"
-          }
-        },
-        "no-direct-db-query": {
           "$ref": "#/$defs/RuleSettings184",
           "default": {
             "enabled": true,
             "level": "Warning"
           }
         },
-        "no-implicit-model-query": {
+        "no-direct-db-query": {
           "$ref": "#/$defs/RuleSettings185",
+          "default": {
+            "enabled": true,
+            "level": "Warning"
+          }
+        },
+        "no-implicit-model-query": {
+          "$ref": "#/$defs/RuleSettings186",
           "default": {
             "enabled": true,
             "level": "Note"
           }
         },
         "no-db-schema-change": {
-          "$ref": "#/$defs/RuleSettings186",
-          "default": {
-            "enabled": true,
-            "level": "Error"
-          }
-        },
-        "no-unescaped-output": {
           "$ref": "#/$defs/RuleSettings187",
           "default": {
             "enabled": true,
             "level": "Error"
           }
         },
-        "no-roles-as-capabilities": {
+        "no-unescaped-output": {
           "$ref": "#/$defs/RuleSettings188",
+          "default": {
+            "enabled": true,
+            "level": "Error"
+          }
+        },
+        "no-roles-as-capabilities": {
+          "$ref": "#/$defs/RuleSettings189",
           "default": {
             "enabled": true,
             "level": "Warning"
           }
         },
         "missing-docs": {
-          "$ref": "#/$defs/RuleSettings189",
+          "$ref": "#/$defs/RuleSettings190",
           "default": {
             "enabled": false,
             "level": "Help",
@@ -3593,14 +3610,66 @@
           }
         },
         "no-literal-namespace-string": {
-          "$ref": "#/$defs/RuleSettings190",
+          "$ref": "#/$defs/RuleSettings191",
           "default": {
             "enabled": false,
             "level": "Warning"
           }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "patternProperties": {
+        "/": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "description": "Represents the severity level of an issue.",
+                  "oneOf": [
+                    {
+                      "description": "A note, providing additional information or context.",
+                      "type": "string",
+                      "const": "Note"
+                    },
+                    {
+                      "description": "A help message, suggesting possible solutions or further actions.",
+                      "type": "string",
+                      "const": "Help"
+                    },
+                    {
+                      "description": "A warning, indicating a potential problem that may need attention.",
+                      "type": "string",
+                      "const": "Warning"
+                    },
+                    {
+                      "description": "An error, indicating a problem that prevents the code from functioning correctly.",
+                      "type": "string",
+                      "const": "Error"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exclude": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      }
     },
     "RuleSettings": {
       "type": "object",
@@ -7708,7 +7777,7 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Warning"
+          "default": "Help"
         }
       },
       "additionalProperties": false
@@ -7728,7 +7797,7 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Help"
+          "default": "Warning"
         }
       },
       "additionalProperties": false
@@ -7738,7 +7807,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "exclude": {
           "type": "array",
@@ -7748,7 +7817,7 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Warning"
+          "default": "Help"
         }
       },
       "additionalProperties": false
@@ -7788,7 +7857,7 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Note"
+          "default": "Warning"
         }
       },
       "additionalProperties": false
@@ -7808,7 +7877,7 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Error"
+          "default": "Note"
         }
       },
       "additionalProperties": false
@@ -7848,12 +7917,32 @@
         },
         "level": {
           "$ref": "#/$defs/Level",
-          "default": "Warning"
+          "default": "Error"
         }
       },
       "additionalProperties": false
     },
     "RuleSettings189": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "level": {
+          "$ref": "#/$defs/Level",
+          "default": "Warning"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuleSettings190": {
       "type": "object",
       "properties": {
         "enabled": {
@@ -8006,7 +8095,7 @@
       },
       "additionalProperties": false
     },
-    "RuleSettings190": {
+    "RuleSettings191": {
       "type": "object",
       "properties": {
         "enabled": {
@@ -8707,6 +8796,11 @@
           "type": "boolean",
           "default": false
         },
+        "check-dead-catch": {
+          "description": "Whether to report catch clauses that cannot catch any known exception.\n\nThis check only runs when `check_throws` is enabled and defaults to `false`,\nsince undocumented code may still throw exceptions that static analysis cannot see.",
+          "type": "boolean",
+          "default": false
+        },
         "unchecked-exceptions": {
           "description": "Exceptions to ignore including all subclasses (hierarchy-aware).\n\nWhen an exception class is listed here, any exception of that class or any of its\nsubclasses will be ignored during `check_throws` analysis.\n\nFor example, adding `LogicException` will ignore `LogicException`, `InvalidArgumentException`,\n`OutOfBoundsException`, and all other subclasses.",
           "type": "array",
@@ -8735,6 +8829,11 @@
         },
         "allow-array-truthy-operand": {
           "description": "Allow arrays as operands of logical operators (`&&`, `||`, `xor`).\n\nWhen `true`, the analyzer accepts arrays on either side of a logical operator\nwithout emitting `invalid-operand`. Defaults to `false`, which mirrors the\nlong-standing behavior of flagging implicit `bool` coercion of arrays. Standalone\n`if ($array)` is unaffected and never warns.",
+          "type": "boolean",
+          "default": false
+        },
+        "allow-operator-overloading": {
+          "description": "Allow operators on classes that overload them, such as `BcMath\\Number` and `GMP`.\n\nWhen `true`, the analyzer accepts these operators without emitting `invalid-operand`.\nDefaults to `false`, which reports them while still inferring the result as an instance\nof the class. Comparisons and `<=>` are unaffected.",
           "type": "boolean",
           "default": false
         },
