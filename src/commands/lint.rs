@@ -50,7 +50,9 @@ use crate::commands::stdin_input;
 use crate::config::Configuration;
 use crate::error::Error;
 use crate::extensions::initialize_external_linter;
+use crate::extensions::warn_about_unregistered_rules;
 use crate::utils::create_orchestrator;
+use crate::utils::drop_in_background;
 use crate::utils::git;
 
 /// Command for linting PHP source code.
@@ -294,8 +296,16 @@ impl LintCommand {
         })?;
         let load_database_duration = load_database_start.map(|s| s.elapsed());
 
+        warn_about_unregistered_rules(&configuration.linter.rules, external_linter.as_ref());
+
         let mut service = orchestrator.get_lint_service(database.read_only());
-        if let Some(external_linter) = external_linter {
+        if let Some(mut external_linter) = external_linter {
+            if !self.pedantic {
+                external_linter
+                    .configure(&configuration.linter.rules.extensions, configuration.source.glob.to_database_settings())
+                    .map_err(mago_orchestrator::OrchestratorError::from)?;
+            }
+
             service = service.with_external_linter(Arc::new(external_linter));
         }
 
@@ -351,7 +361,7 @@ impl LintCommand {
         }
 
         let drop_database_start = trace_enabled.then(Instant::now);
-        drop(database);
+        drop_in_background(database.into_static());
         let drop_database_duration = drop_database_start.map(|s| s.elapsed());
 
         let drop_orchestrator_start = trace_enabled.then(Instant::now);

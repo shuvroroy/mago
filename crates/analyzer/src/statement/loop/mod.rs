@@ -818,6 +818,19 @@ where
                     result?;
                 }
 
+                if is_do {
+                    for (variable_id, parent_type) in &original_parent_context.locals {
+                        if let Some(continue_type) = continue_context.locals.get_mut(variable_id) {
+                            *continue_type = combine_union_types_rc(
+                                continue_type,
+                                parent_type,
+                                codebase,
+                                CombinerOptions::default(),
+                            );
+                        }
+                    }
+                }
+
                 pre_conditions_applied = true;
 
                 for variable_id in &always_assigned_before_loop_body_variables {
@@ -1040,10 +1053,10 @@ where
         // if the loop contains an assertion and there are no break statements, we can negate that assertion
         // and apply it to the current context
 
-        let pre_condition_clauses = pre_condition_clauses.into_iter().flatten().collect();
+        let pre_condition_clauses: Vec<Clause> = pre_condition_clauses.into_iter().flatten().collect();
         let negated_pre_condition_clauses = if pre_conditions.len() == 1 {
             negate_or_synthesize(
-                pre_condition_clauses,
+                &pre_condition_clauses,
                 pre_conditions[0],
                 context.get_assertion_context_from_block(&continue_context),
                 artifacts,
@@ -1051,7 +1064,7 @@ where
                 context.settings.formula_size_threshold,
             )
         } else {
-            negate_formula(pre_condition_clauses, &context.settings.algebra_thresholds()).unwrap_or_default()
+            negate_formula(&pre_condition_clauses, &context.settings.algebra_thresholds()).unwrap_or_default()
         };
 
         let (negated_pre_condition_types, _) =

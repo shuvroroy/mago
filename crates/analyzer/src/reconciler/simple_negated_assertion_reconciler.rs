@@ -18,8 +18,8 @@ use mago_codex::ttype::atomic::scalar::bool::TBool;
 use mago_codex::ttype::atomic::scalar::float::TFloat;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::comparator::union_comparator;
-use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
+use mago_codex::ttype::get_null;
 use mago_codex::ttype::get_undefined_null;
 use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::union::TUnion;
@@ -31,6 +31,7 @@ use crate::reconciler::Context;
 use crate::reconciler::map_generic_constraint;
 use crate::reconciler::simple_assertion_reconciler::get_acceptable_type;
 use crate::reconciler::simple_assertion_reconciler::intersect_null;
+use crate::reconciler::simple_assertion_reconciler::reconcile_non_empty_countable;
 use crate::reconciler::trigger_issue_for_impossible;
 
 pub(crate) fn reconcile<A>(
@@ -167,6 +168,9 @@ where
                     assertion.has_equality(),
                 ));
             }
+            TAtomic::Array(array) if array.is_empty() && matches!(assertion, Assertion::IsNotIdentical(_)) => {
+                return Some(reconcile_non_empty_countable(context, assertion, existing_var_type, key, negated, span));
+            }
             TAtomic::Array(TArray::List(_)) => {
                 return Some(subtract_list_array(
                     context,
@@ -228,9 +232,8 @@ where
         Assertion::Falsy | Assertion::Empty => {
             Some(reconcile_falsy_or_empty(context, assertion, existing_var_type, key, negated, span))
         }
-        Assertion::IsNotIsset | Assertion::ArrayKeyDoesNotExist => {
-            Some(reconcile_not_isset(context, existing_var_type, key, span))
-        }
+        Assertion::IsNotIsset => Some(reconcile_not_isset(existing_var_type, key)),
+        Assertion::ArrayKeyDoesNotExist => Some(get_undefined_null()),
         Assertion::DoesNotHaveArrayKey(key_name) => {
             Some(reconcile_no_array_key(context, assertion, existing_var_type, key, span, key_name, negated))
         }
@@ -1302,31 +1305,19 @@ where
     )
 }
 
-fn reconcile_not_isset<A>(
-    _context: &mut Context<'_, '_, A>,
-    existing_var_type: &TUnion,
-    key: Option<&[u8]>,
-    span: Option<&Span>,
-) -> TUnion
-where
-    A: Arena,
-{
-    // When !isset is true, the value is definitely not set (either null or undefined)
-    // For array accesses, this means the key doesn't exist or the value is null
-    // In both cases, the resulting type should be null
+fn reconcile_not_isset(existing_var_type: &TUnion, key: Option<&[u8]>) -> TUnion {
     if existing_var_type.possibly_undefined() || existing_var_type.possibly_undefined_from_try() {
         return get_undefined_null();
     }
 
-    if !existing_var_type.is_nullable()
-        && let Some(key) = key
+    if existing_var_type.can_be_null() {
+        return get_null();
+    }
+
+    if let Some(key) = key
         && memchr::memchr(b'[', key).is_none()
         && (!existing_var_type.is_mixed() || existing_var_type.is_always_truthy())
     {
-        if span.is_some() {
-            // todo
-        }
-
         return get_never();
     }
 
@@ -1461,7 +1452,7 @@ where
         trigger_issue_for_impossible(context, existing_var_type.get_id(), key, assertion, true, negated, pos);
     }
 
-    get_mixed()
+    existing_var_type.clone()
 }
 
 fn reconcile_no_array_key<A>(
@@ -1488,6 +1479,10 @@ where
                         if known_item.0 {
                             Arc::make_mut(known_items).remove(key_name);
                             did_remove_type = true;
+                        } else {
+                            did_remove_type = true;
+
+                            continue;
                         }
                     } else if let Some((key_parameter, _)) = parameters
                         && union_comparator::can_expression_types_be_identical(

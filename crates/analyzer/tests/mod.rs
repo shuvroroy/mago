@@ -55,6 +55,7 @@ macro_rules! test_case {
 
 test_case!(accessing_undefined_class_constant);
 test_case!(generic_docblock_native_return);
+test_case!(message_quality);
 test_case!(ds_map_defaults);
 test_case!(ds_map_default_type_errors);
 test_case!(rdkafka_producer);
@@ -131,6 +132,7 @@ test_case!(arrays_array_map_multi);
 test_case!(arrays_array_merge_two_lists);
 test_case!(arrays_max_on_possibly_empty);
 test_case!(arrays_min_on_possibly_empty);
+test_case!(arrays_mixed_key_literal_and_write);
 test_case!(arrays_array_pop);
 test_case!(arrays_array_pop_empty);
 test_case!(arrays_array_product);
@@ -286,6 +288,7 @@ test_case!(bin2hex);
 test_case!(break_narrowing);
 test_case!(by_reference_invalidation);
 test_case!(callable_template_inference);
+test_case!(callable_type_assertions);
 test_case!(class_like_constant_access);
 test_case!(class_probe_allow_string_result);
 test_case!(class_probe_dynamic_class_argument);
@@ -309,6 +312,17 @@ test_case!(docblock_param_basic);
 test_case!(docblock_return_basic);
 test_case!(docblock_throws_exception);
 test_case!(docblock_throws_unhandled);
+test_case!(issue_2544_backed_enum_from_throws);
+test_case!(issue_2503_dead_catch, {
+    let mut settings = default_test_settings();
+    settings.check_dead_catch = true;
+    settings
+});
+test_case!(issue_2503_check_throws_disabled, {
+    let mut settings = default_test_settings();
+    settings.check_throws = false;
+    settings
+});
 test_case!(docblock_param_out);
 test_case!(docblock_assert_method);
 test_case!(docblock_assert_if_true);
@@ -400,6 +414,8 @@ test_case!(docblock_key_of_literal_union);
 test_case!(docblock_array_shape_required_key);
 test_case!(docblock_array_shape_optional_key);
 test_case!(docblock_array_list_param);
+test_case!(docblock_array_mixed_key);
+test_case!(docblock_spaced_array_shorthand);
 test_case!(docblock_template_in_method);
 test_case!(docblock_param_class_string_template);
 test_case!(docblock_double_intersection_chain);
@@ -410,6 +426,7 @@ test_case!(docblock_type_mismatch);
 test_case!(docblock_type_narrowing);
 test_case!(docblock_type_parsing_verification);
 test_case!(docblock_var_on_non_assignment);
+test_case!(does_not_have_array_key_union_reconciliation);
 test_case!(empty_switch);
 test_case!(empty_construct);
 test_case!(generator_return_yield);
@@ -427,6 +444,7 @@ test_case!(intersection_stringable);
 test_case!(iterable_array_comparison);
 test_case!(iterable_count);
 test_case!(iterable_reconciliation);
+test_case!(iterable_type_reconciliation);
 test_case!(non_empty_string_magic_constant);
 test_case!(non_utf8_method_names);
 test_case!(non_utf8_class_names);
@@ -584,11 +602,13 @@ test_case!(switch_case_after_default_is_unreachable);
 test_case!(switch_logically_unreachable_case);
 test_case!(switch_on_literal);
 test_case!(switch_redundant_condition);
+test_case!(switch_get_class_gettype_case_narrowing);
 test_case!(conditional_always_truthy);
 test_case!(conditional_always_falsy);
 test_case!(conditional_mixed_types);
 test_case!(conditional_with_assignment);
 test_case!(conditional_nested);
+test_case!(conditional_reanalysis_assigned_var_pollution);
 test_case!(elvis_operator_with_null);
 test_case!(elvis_operator_with_falsy_string);
 test_case!(error_suppressed_condition_narrowing);
@@ -670,6 +690,7 @@ test_case!(trait_property_initialization);
 test_case!(deep_inheritance_init);
 test_case!(properties_added_to_context);
 test_case!(throwing_exceptions);
+test_case!(redundant_nullsafe_suppressing_context);
 test_case!(reference_reused_from_confusing_scope);
 test_case!(reconcile_literl_class_string);
 test_case!(class_string_is_never_equal_to_literal_string);
@@ -689,6 +710,7 @@ test_case!(untyped_property_docblock);
 test_case!(property_override_incomparable_type);
 test_case!(count);
 test_case!(array_key_exists);
+test_case!(array_shape_numeric_string_key_normalization);
 test_case!(magic_methods);
 test_case!(magic_properties);
 test_case!(magic_property_overridden_by_parent);
@@ -982,6 +1004,9 @@ test_case!(pipe_callable_implicit_types_outside_pipe_warns, {
     s
 });
 test_case!(spread_list);
+test_case!(spl_class_implements_object);
+test_case!(spl_class_name_map_keys);
+test_case!(soap_var_optional_type_name);
 test_case!(or_never);
 test_case!(abstract_method_inheritance);
 test_case!(variadic_array_type);
@@ -1243,12 +1268,14 @@ test_case!(callables_null_argument_to_non_null);
 test_case!(callables_false_argument_to_non_false);
 test_case!(callables_named_argument_basic);
 test_case!(issue_2498_named_arguments);
+test_case!(invocation_default_type_expansion);
 test_case!(callables_named_argument_unknown);
 test_case!(callables_named_argument_overrides_positional);
 test_case!(callables_variadic_int_basic);
 test_case!(callables_variadic_wrong_type);
 test_case!(callables_variadic_strict_default_is_not_a_list);
 test_case!(callables_variadic_no_named_arguments_is_list);
+test_case!(class_level_no_named_arguments);
 test_case!(callables_spread_array_into_args);
 test_case!(callables_spread_assoc_as_named);
 test_case!(callables_spread_assoc_unknown_name);
@@ -1366,6 +1393,7 @@ test_case!(stringable_interfaces);
 test_case!(stringable_names);
 test_case!(strings_ucfirst_with_int);
 test_case!(strings_ucwords_with_array);
+test_case!(strings_base64_decode);
 test_case!(strings_bin2hex_with_array);
 test_case!(strings_str_replace_with_int_search);
 test_case!(strings_preg_match_with_int_pattern);
@@ -1552,6 +1580,7 @@ test_case!(flow_match_no_default_int);
 test_case!(flow_match_no_match_throws);
 test_case!(flow_switch_basic_narrow);
 test_case!(flow_switch_default_narrow);
+test_case!(flow_switch_nested_transfers);
 test_case!(flow_try_catch_throwable);
 test_case!(flow_try_catch_specific);
 test_case!(flow_try_multi_catch_pipe);
@@ -1780,6 +1809,7 @@ test_case!(callables_invalid_yield_outside_function);
 test_case!(callables_invoke_int_as_function);
 test_case!(callables_is_callable_narrowing);
 test_case!(callables_is_callable_narrowing_string);
+test_case!(callables_is_callable_negative_string);
 test_case!(callables_missing_return_statement);
 test_case!(callables_named_argument_repeated);
 test_case!(callables_nested_closure);
@@ -1884,6 +1914,12 @@ test_case!(flow_isset_with_local_var);
 test_case!(flow_loop_with_break_then_use);
 test_case!(flow_loose_eq_null);
 test_case!(flow_match_true_redundant_last_arm);
+test_case!(flow_match_assignment_subject_enum);
+test_case!(flow_match_assignment_subject_literal);
+test_case!(flow_match_assignment_subject_nullable_enum);
+test_case!(flow_match_assignment_subject_single_evaluation);
+test_case!(flow_match_assignment_subject_target_narrowing);
+test_case!(flow_match_assignment_subject_wider_value);
 test_case!(flow_match_default_only_warn);
 test_case!(flow_match_int_with_default);
 test_case!(flow_match_match_in_arm);
@@ -2845,6 +2881,12 @@ test_case!(issue_2483);
 test_case!(issue_2484);
 test_case!(issue_2485);
 test_case!(issue_2499);
+test_case!(issue_2508);
+test_case!(issue_2520);
+test_case!(issue_2523);
+test_case!(issue_2563);
+test_case!(issue_2585);
+test_case!(issue_2594);
 test_case!(simplexml_truthiness);
 test_case!(closure_capture_by_reference_array);
 test_case!(nullable_receiver_method_call);
@@ -2858,6 +2900,26 @@ test_case!(iterator_foreach_value_type);
 test_case!(possibly_undefined_switch_finally);
 test_case!(inline_var_tag_undefined_variable);
 test_case!(phpdoc_native_type_merge);
+test_case!(bcmath_number_arithmetic, crate::framework::operator_overloading_settings());
+test_case!(gmp_arithmetic, crate::framework::operator_overloading_settings());
+test_case!(operator_overloading_unary, crate::framework::operator_overloading_settings());
+test_case!(operator_overloading_comparison, crate::framework::operator_overloading_settings());
+test_case!(operator_overloading_disabled);
+test_case!(large_constant_map_unknown_ref);
+test_case!(is_a_mixed_parameter_stub);
+test_case!(strict_in_array_int_haystack_string_coercion);
+test_case!(short_circuit_assignment_type_propagation);
+test_case!(isset_literal_variable_array_key_narrowing);
+test_case!(loose_null_equality_narrowing_drops_falsy_strings);
+test_case!(in_array_possible_and_required_values);
+test_case!(negated_isset_nullable_array_keys);
+test_case!(nested_isset_array_shapes);
+test_case!(foreach_empty_array);
+test_case!(foreach_empty_array_analyze_dead_code, {
+    let mut settings = default_test_settings();
+    settings.analyze_dead_code = true;
+    settings
+});
 
 #[test]
 fn issue_2478_without_property_memoization() {
@@ -2874,6 +2936,9 @@ fn issue_2478_php84() {
 
     framework::TestCase::new("issue_2478", include_bytes!("cases/issue_2478.php")).settings(settings).run();
 }
+
+test_case!(chained_logical_or_assignment_subsequent_operand);
+test_case!(switch_paradoxical_unreachable_case_detection);
 
 #[test]
 #[cfg_attr(miri, ignore)]

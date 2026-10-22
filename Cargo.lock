@@ -285,6 +285,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f74872d07caf508b30a21f6836e7d7016a2eaf7d9ff4f48deaa58cd8a0407630"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1267,6 +1269,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1380,8 +1392,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "mago"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
+ "bincode",
  "clap",
  "clap_complete",
  "colored 3.1.1",
@@ -1434,11 +1447,12 @@ dependencies = [
  "unicode-width",
  "ureq",
  "zip",
+ "zstd",
 ]
 
 [[package]]
 name = "mago-algebra"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "codspeed-criterion-compat",
  "foldhash",
@@ -1450,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "mago-allocator"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "allocator-api2",
  "blink-alloc",
@@ -1461,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "mago-analyzer"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "codspeed-criterion-compat",
  "diffy",
@@ -1494,19 +1508,20 @@ dependencies = [
 
 [[package]]
 name = "mago-bytes"
-version = "1.56.3"
+version = "1.58.2"
 
 [[package]]
 name = "mago-casing"
-version = "1.56.3"
+version = "1.58.2"
 
 [[package]]
 name = "mago-codex"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "codspeed-criterion-compat",
  "foldhash",
  "indexmap",
+ "itoa",
  "mago-allocator",
  "mago-bytes",
  "mago-database",
@@ -1530,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "mago-collector"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "mago-allocator",
@@ -1544,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "mago-composer"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "serde",
@@ -1553,11 +1568,12 @@ dependencies = [
 
 [[package]]
 name = "mago-database"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "glob",
  "globset",
+ "ignore",
  "memchr",
  "notify",
  "rayon",
@@ -1569,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "mago-documentation"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1591,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "mago-extension"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "mago-names",
@@ -1604,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "mago-fingerprint"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "indoc",
@@ -1619,14 +1635,14 @@ dependencies = [
 
 [[package]]
 name = "mago-flags"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "mago-formatter"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "indoc",
@@ -1646,7 +1662,7 @@ dependencies = [
 
 [[package]]
 name = "mago-guard"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "indoc",
@@ -1670,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "mago-hir"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "itoa",
  "mago-allocator",
@@ -1689,7 +1705,7 @@ dependencies = [
 
 [[package]]
 name = "mago-linter"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "indoc",
@@ -1720,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "mago-names"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "mago-allocator",
@@ -1734,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "mago-orchestrator"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "foldhash",
  "indicatif",
@@ -1760,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "mago-php-version"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "schemars",
  "serde",
@@ -1769,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "mago-phpdoc-syntax"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "indoc",
  "mago-allocator",
@@ -1784,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "mago-prelude"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "bincode",
  "codspeed-criterion-compat",
@@ -1794,13 +1810,14 @@ dependencies = [
  "mago-names",
  "mago-php-version",
  "mago-syntax",
+ "mago-word",
  "rust-embed",
  "serde",
 ]
 
 [[package]]
 name = "mago-reporting"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "ariadne",
  "blake3",
@@ -1824,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "mago-semantics"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "mago-allocator",
  "mago-bytes",
@@ -1838,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "mago-span"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "mago-database",
  "serde",
@@ -1846,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "codspeed-criterion-compat",
  "mago-allocator",
@@ -1867,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "mago-syntax-core"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "mago-allocator",
  "mago-database",
@@ -1878,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "mago-text-edit"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -1886,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "mago-twig-syntax"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "codspeed-criterion-compat",
  "indoc",
@@ -1902,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "mago-wasm"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
  "mago-allocator",
  "mago-analyzer",
@@ -1923,11 +1940,13 @@ dependencies = [
 
 [[package]]
 name = "mago-word"
-version = "1.56.3"
+version = "1.58.2"
 dependencies = [
+ "bincode",
  "foldhash",
  "itoa",
  "mago-bytes",
+ "parking_lot",
  "ryu",
  "serde",
 ]
@@ -2255,6 +2274,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plotters"
@@ -4085,4 +4110,32 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
 ]

@@ -59,6 +59,12 @@ pub struct Settings {
     /// This check is disabled by default (`false`) as it can be computationally expensive.
     pub check_throws: bool,
 
+    /// Check whether each catch clause can catch a known exception from its try block.
+    ///
+    /// This check only runs when `check_throws` is enabled. It is disabled by default
+    /// because exceptions from undocumented code cannot be ruled out statically.
+    pub check_dead_catch: bool,
+
     /// Exceptions to ignore including all subclasses (hierarchy-aware).
     ///
     /// When an exception class is in this set, any exception of that class or any of its
@@ -127,6 +133,17 @@ pub struct Settings {
     /// to call out the implicit `bool` coercion. This matches the long-standing default
     /// behavior; standalone `if ($array)` is still accepted and never produces this warning.
     pub allow_array_truthy_operand: bool,
+
+    /// Allow operators on classes that overload them, such as `BcMath\Number` and `GMP`.
+    ///
+    /// When `true`, the analyzer accepts arithmetic, bitwise and shift operators, as well as
+    /// `-`, `+`, `~`, `++` and `--`, on instances of these classes wherever the class
+    /// overloads the operator.
+    ///
+    /// When `false` (the default), the analyzer reports these operations with `invalid-operand`
+    /// but still infers their result as an instance of the class. Comparisons and `<=>` are
+    /// not affected by this setting.
+    pub allow_operator_overloading: bool,
 
     /// Disable comparisons to boolean literals (`true`/`false`).
     ///
@@ -408,6 +425,7 @@ impl Settings {
             memoize_properties: true,
             allow_possibly_undefined_array_keys: true,
             check_throws: false,
+            check_dead_catch: false,
             unchecked_exceptions: WordSet::default(),
             unchecked_exception_classes: WordSet::default(),
             use_colors: true,
@@ -416,6 +434,7 @@ impl Settings {
             strict_list_index_checks: false,
             strict_array_index_existence: false,
             allow_array_truthy_operand: false,
+            allow_operator_overloading: false,
             no_boolean_literal_comparison: false,
             enforce_class_finality: false,
             require_api_or_internal: false,

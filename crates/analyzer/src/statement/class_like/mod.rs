@@ -4,6 +4,7 @@ use foldhash::fast::RandomState;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use mago_allocator::Arena;
+use std::borrow::Cow;
 
 use mago_bytes::BytesDisplay;
 use mago_codex::context::ScopeContext;
@@ -879,12 +880,6 @@ where
                 }
             }
 
-            let Some(declaring_class_like_metadata) =
-                context.codebase.get_class_like_by_name(method_id.get_class_name())
-            else {
-                continue;
-            };
-
             let Some(function_like) = context.codebase.get_method_by_id(method_id) else {
                 continue;
             };
@@ -894,6 +889,12 @@ where
             };
 
             if method_metadata.is_abstract {
+                let Some(declaring_class_like_metadata) =
+                    context.codebase.get_class_like_by_name(method_id.get_class_name())
+                else {
+                    continue;
+                };
+
                 let fqcn = declaring_class_like_metadata.original_name;
                 let method_span = function_like.name_span.unwrap_or(function_like.span);
 
@@ -1183,7 +1184,7 @@ fn check_class_like_extends<'ctx, 'arena, A>(
 
         // Case: The extended type does not exist.
         let Some(extended_class_metadata) = extended_class_metadata else {
-            let extended_name = BytesDisplay(extended_type.value());
+            let extended_name = BytesDisplay(extended_type_str);
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
@@ -1451,7 +1452,8 @@ fn check_class_like_implements<'ctx, 'arena, A>(
 
             check_interface_method_signatures(context, class_like_metadata, implemented_metadata, checked_signatures);
         } else {
-            let implemented_name = BytesDisplay(implemented_type.value());
+            let implemented_type_str = context.resolved_names.get(&implemented_type);
+            let implemented_name = BytesDisplay(implemented_type_str);
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
@@ -1483,7 +1485,7 @@ fn check_class_like_use<'ctx, 'arena, A>(
         let used_trait_metadata = context.codebase.get_class_like(used_type_str);
 
         let Some(used_trait_metadata) = used_trait_metadata else {
-            let used_name = BytesDisplay(used_type.value());
+            let used_name = BytesDisplay(used_type_str);
 
             context.collector.report_with_code(
                 IssueCode::NonExistentClassLike,
@@ -2626,18 +2628,18 @@ fn report_trait_property_conflict<A>(
 /// Gets the substituted method by applying template parameter mapping from the class.
 /// Returns the original method if no template substitution is needed.
 #[inline]
-fn get_substituted_method(
-    method: &FunctionLikeMetadata,
+fn get_substituted_method<'method>(
+    method: &'method FunctionLikeMetadata,
     class_like_metadata: &ClassLikeMetadata,
     parent_class_name: Word,
     codebase: &CodebaseMetadata,
-) -> FunctionLikeMetadata {
+) -> Cow<'method, FunctionLikeMetadata> {
     let parameterizations: Vec<&IndexMap<Word, TUnion, RandomState>> =
         match class_like_metadata.template_extended_parameter_paths.get(&parent_class_name) {
             Some(paths) if !paths.is_empty() => paths.iter().collect(),
             _ => match class_like_metadata.template_extended_parameters.get(&parent_class_name) {
                 Some(mapping) if !mapping.is_empty() => vec![mapping],
-                _ => return method.clone(),
+                _ => return Cow::Borrowed(method),
             },
         };
 
@@ -2655,14 +2657,14 @@ fn get_substituted_method(
     });
 
     let Some(mut merged) = substituted.next() else {
-        return method.clone();
+        return Cow::Borrowed(method);
     };
 
     for other in substituted {
         merge_method_signature_into(&mut merged, &other, codebase);
     }
 
-    merged
+    Cow::Owned(merged)
 }
 
 /// Folds one parameterization of an inherited method into the running merge:

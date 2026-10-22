@@ -56,11 +56,18 @@ pub struct ResolvedMethodCall {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct ShortCircuitAssignmentTypes {
+    pub when_true: WordMap<Rc<TUnion>>,
+    pub when_false: WordMap<Rc<TUnion>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AnalysisArtifacts {
     pub expression_types: HashMap<(u32, u32), Rc<TUnion>>,
     pub if_true_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub if_false_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub true_branch_only_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
+    pub(crate) short_circuit_assignment_types: HashMap<(u32, u32), ShortCircuitAssignmentTypes>,
     pub inferred_return_types: Vec<Rc<TUnion>>,
     pub inferred_yield_key_types: Vec<TUnion>,
     pub inferred_yield_value_types: Vec<TUnion>,
@@ -101,6 +108,7 @@ impl AnalysisArtifacts {
             if_true_assertions: HashMap::default(),
             if_false_assertions: HashMap::default(),
             true_branch_only_assertions: HashMap::default(),
+            short_circuit_assignment_types: HashMap::default(),
             symbol_references: SymbolReferences::new(),
             case_scopes: Vec::new(),
             loop_scope: None,
@@ -129,6 +137,10 @@ impl AnalysisArtifacts {
 
     pub(crate) fn should_retain_completed_expression_types(&self) -> bool {
         self.retain_completed_expression_types || !self.expression_type_checkpoints.is_empty()
+    }
+
+    pub(crate) fn retains_completed_expression_types(&self) -> bool {
+        self.retain_completed_expression_types
     }
 
     pub(crate) fn record_static_local_types(
@@ -294,6 +306,14 @@ impl AnalysisArtifacts {
         if let Some(editor) = &mut self.editor {
             editor.begin_checkpoint();
         }
+    }
+
+    pub(crate) fn begin_expression_type_recording(&mut self) {
+        self.expression_type_checkpoints.begin_checkpoint();
+    }
+
+    pub(crate) fn finish_expression_type_recording(&mut self) -> Vec<((u32, u32), Rc<TUnion>)> {
+        self.expression_type_checkpoints.finish_recording(&self.expression_types)
     }
 
     pub(crate) fn expression_type_checkpoint_matches(&self, same: impl Fn(&TUnion, &TUnion) -> bool) -> bool {

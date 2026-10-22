@@ -147,7 +147,9 @@ pub fn get_union_from_type(
             let left = get_union_from_type(union_type.left, scope, type_context, classname)?;
             let right = get_union_from_type(union_type.right, scope, type_context, classname)?;
 
-            let combined_types: Vec<TAtomic> = left.types.iter().chain(right.types.iter()).cloned().collect();
+            let mut combined_types = Vec::with_capacity(left.types.len() + right.types.len());
+            combined_types.extend(left.types.into_owned());
+            combined_types.extend(right.types.into_owned());
 
             TUnion::from_vec(combined_types)
         }
@@ -349,7 +351,9 @@ pub fn get_union_from_type(
             wrap_atomic(get_callable_from_type(callable_type, scope, type_context, classname)?)
         }
         Type::Reference(reference_type) => {
-            if let ReferenceKind::Identifier(identifier) = &reference_type.kind {
+            if type_context.has_type_aliases()
+                && let ReferenceKind::Identifier(identifier) = &reference_type.kind
+            {
                 let reference_name_atom = word(identifier.value);
 
                 if let Some((source_class, original_name)) = type_context.get_imported_type_alias(reference_name_atom) {
@@ -425,12 +429,19 @@ pub fn get_union_from_type(
 
                     wrap_atomic(TAtomic::Iterable(TIterable::of_value(Arc::new(value_type))))
                 }
-                _ => {
+                2 => {
                     let key_type = get_union_from_type(&parameters.entries[0].inner, scope, type_context, classname)?;
 
                     let value_type = get_union_from_type(&parameters.entries[1].inner, scope, type_context, classname)?;
 
                     wrap_atomic(TAtomic::Iterable(TIterable::new(Arc::new(key_type), Arc::new(value_type))))
+                }
+                len => {
+                    return Err(TypeError::InvalidType(
+                        ttype.to_string(),
+                        format!("`iterable<K, V>` expects at most 2 parameters (key, value), got {len}"),
+                        ttype.span(),
+                    ));
                 }
             },
             None => wrap_atomic(TAtomic::Iterable(TIterable::mixed())),
@@ -580,9 +591,9 @@ fn get_reference_class_name(
         ReferenceKind::Identifier(identifier) if identifier.value.eq(b"this") => require_classname()?,
         ReferenceKind::Parent(_) => word("parent"),
         ReferenceKind::Identifier(identifier) => {
-            let (class_like_name, _) = scope.resolve(NameKind::Default, identifier.value);
+            let (class_like_name, _) = scope.resolve_word(NameKind::Default, identifier.value);
 
-            if lowercase_resolved_identifier { ascii_lowercase_word(&class_like_name) } else { word(&class_like_name) }
+            if lowercase_resolved_identifier { class_like_name.to_ascii_lowercase() } else { class_like_name }
         }
     })
 }
@@ -601,8 +612,7 @@ fn get_array_key_from_shape_key(key: &ShapeKey<'_>, scope: &NamespaceScope, clas
             } else if class_name.value.eq_ignore_ascii_case(b"parent") {
                 word("parent")
             } else {
-                let (resolved, _) = scope.resolve(NameKind::Default, class_name.value);
-                word(&resolved)
+                scope.resolve_word(NameKind::Default, class_name.value).0
             };
 
             ArrayKey::ClassLikeConstant { class_like_name, constant_name: word(constant_name.value) }
@@ -882,17 +892,17 @@ fn get_reference_from_kind(
         }
         ReferenceKind::Identifier(identifier) => {
             let reference_name = identifier.value;
-            let reference_name_atom = word(reference_name);
-            if let Some(defining_entities) = type_context.get_template_definition(reference_name_atom)
-                && generics.is_none()
-            {
-                return Ok(get_template_atomic(defining_entities, reference_name_atom));
+            if generics.is_none() && type_context.has_template_definitions() {
+                let reference_name_atom = word(reference_name);
+                if let Some(defining_entities) = type_context.get_template_definition(reference_name_atom) {
+                    return Ok(get_template_atomic(defining_entities, reference_name_atom));
+                }
             }
 
-            let (fq_reference_name, _) = scope.resolve(NameKind::Default, reference_name);
+            let (fq_reference_name, _) = scope.resolve_word(NameKind::Default, reference_name);
 
             // `Closure` -> `Closure(mixed...): mixed`
-            if fq_reference_name.eq_ignore_ascii_case(b"Closure") && generics.is_none() {
+            if generics.is_none() && fq_reference_name.as_bytes().eq_ignore_ascii_case(b"Closure") {
                 return Ok(TAtomic::Callable(TCallable::Signature(
                     TCallableSignature::new(false, true)
                         .with_parameters(vec![TCallableParameter::new(Some(Arc::new(get_mixed())), false, true, false)])
@@ -900,7 +910,7 @@ fn get_reference_from_kind(
                 )));
             }
 
-            word(&fq_reference_name)
+            fq_reference_name
         }
     };
 
@@ -1013,7 +1023,11 @@ fn get_array_type<'src>(
 
     let mut array = TKeyedArray::new_with_parameters(
         Arc::new(if let Some(k) = key {
-            get_union_from_type(k, scope, type_context, classname)?
+            if matches!(k, Type::Mixed(_)) {
+                get_arraykey()
+            } else {
+                get_union_from_type(k, scope, type_context, classname)?
+            }
         } else {
             get_arraykey()
         }),

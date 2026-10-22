@@ -198,6 +198,13 @@ macro_rules! define_rules {
                     }
                 }
             )*
+
+            for (code, settings) in &rules.extensions {
+                if let Ok(value) = serde_json::to_value(settings) {
+                    map.insert(code.clone(), value);
+                }
+            }
+
             map
         }
     }
@@ -390,6 +397,7 @@ define_rules! {
     NoAlternativeSyntax(no_alternative_syntax @ NoAlternativeSyntaxRule),
     PreferPreIncrement(prefer_pre_increment @ PreferPreIncrementRule),
     PreferSelfReturnType(prefer_self_return_type @ PreferSelfReturnTypeRule),
+    PreferSelf(prefer_self @ PreferSelfRule),
     SwitchContinueToBreak(switch_continue_to_break @ SwitchContinueToBreakRule),
     MissingDocs(missing_docs @ MissingDocsRule),
     NoNullPropertyInit(no_null_property_init @ NoNullPropertyInitRule),

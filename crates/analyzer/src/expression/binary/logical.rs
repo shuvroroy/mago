@@ -1,4 +1,6 @@
 use mago_allocator::Arena;
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use foldhash::HashSet;
@@ -8,6 +10,7 @@ use mago_algebra::find_satisfying_assignments_iter;
 use mago_algebra::saturate_clauses;
 use mago_algebra::saturate_shared_clauses;
 use mago_bytes::BytesDisplay;
+use mago_codex::assertion::Assertion;
 use mago_codex::ttype::combine_union_types_rc;
 use mago_codex::ttype::get_bool;
 use mago_codex::ttype::get_false;
@@ -27,16 +30,15 @@ use mago_word::WordSet;
 
 use crate::analyzable::Analyzable;
 use crate::artifacts::AnalysisArtifacts;
+use crate::artifacts::ShortCircuitAssignmentTypes;
 use crate::assertion::get_class_type_relations;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
-use crate::context::scope::if_scope::IfScope;
 use crate::error::AnalysisError;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler;
-use crate::utils::conditional;
 use crate::utils::expression::expression_has_observable_side_effect;
 use crate::utils::symbol_existence::extract_function_constant_existence;
 
@@ -51,13 +53,15 @@ fn merge_short_circuited_assignments<'ctx, A>(
 ) where
     A: Arena,
 {
-    for (var_id, right_type) in right_locals {
-        if !right_assigned_var_ids.contains_key(var_id) {
+    for var_id in right_assigned_var_ids.keys() {
+        let Some(right_type) = right_locals.get(var_id) else {
             continue;
-        }
+        };
 
         let Some(left_type) = left_locals.get(var_id) else {
-            block_context.locals.insert(*var_id, Rc::clone(right_type));
+            if block_context.if_body_context.is_none() {
+                block_context.locals.insert(*var_id, Rc::clone(right_type));
+            }
 
             continue;
         };
@@ -67,6 +71,81 @@ fn merge_short_circuited_assignments<'ctx, A>(
             combine_union_types_rc(left_type, right_type, context.codebase, context.settings.combiner_options()),
         );
     }
+}
+
+fn get_short_circuit_branch_types<'ctx, A>(
+    binary: &Binary<'_>,
+    when_true: bool,
+    context: &mut Context<'ctx, '_, A>,
+    artifacts: &AnalysisArtifacts,
+    left_locals: &WordMap<Rc<TUnion>>,
+    right_context: &BlockContext<'ctx>,
+    assigned_variables: &WordMap<u32>,
+) -> WordMap<Rc<TUnion>>
+where
+    A: Arena,
+{
+    let rhs_type = artifacts.get_expression_type(binary.rhs);
+    let right_is_unreachable =
+        rhs_type.is_some_and(|ty| if when_true { ty.is_always_falsy() } else { ty.is_always_truthy() });
+
+    if right_is_unreachable {
+        return assigned_variables.keys().filter_map(|id| left_locals.get(id).map(|ty| (*id, Rc::clone(ty)))).collect();
+    }
+
+    let mut right_context = Cow::Borrowed(right_context);
+    let mut clauses = get_formula(
+        binary.rhs.span(),
+        binary.rhs.span(),
+        binary.rhs,
+        context.get_assertion_context_from_block(&right_context),
+        artifacts,
+        &context.settings.algebra_thresholds(),
+        context.settings.formula_size_threshold,
+    )
+    .unwrap_or_default();
+
+    if !when_true {
+        clauses = negate_or_synthesize(
+            &clauses,
+            binary.rhs,
+            context.get_assertion_context_from_block(&right_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        );
+    }
+
+    let (assertions, active_assertions) = find_satisfying_assignments(&clauses, None, &mut WordSet::default());
+
+    if !assertions.is_empty() {
+        reconciler::reconcile_keyed_types(
+            context,
+            &assertions,
+            active_assertions,
+            right_context.to_mut(),
+            &mut WordSet::default(),
+            &WordSet::default(),
+            &binary.rhs.span(),
+            false,
+            false,
+        );
+    }
+
+    assigned_variables
+        .keys()
+        .filter_map(|id| {
+            Some((
+                *id,
+                combine_union_types_rc(
+                    left_locals.get(id)?,
+                    right_context.locals.get(id)?,
+                    context.codebase,
+                    context.settings.combiner_options(),
+                ),
+            ))
+        })
+        .collect()
 }
 
 #[inline]
@@ -202,6 +281,7 @@ where
         right_block_context.add_class_type_relation(source, target);
     }
 
+    right_block_context.assigned_variable_ids.clear();
     let result_type: TUnion;
     if lhs_type.is_always_falsy() {
         if !block_context.flags.inside_loop_expressions() {
@@ -268,16 +348,17 @@ where
 
     artifacts.set_expression_type(binary, result_type);
 
-    block_context.conditionally_referenced_variable_ids = left_block_context.conditionally_referenced_variable_ids;
+    block_context.conditionally_referenced_variable_ids =
+        left_block_context.conditionally_referenced_variable_ids.clone();
     block_context
         .conditionally_referenced_variable_ids
-        .extend(right_block_context.conditionally_referenced_variable_ids);
+        .extend(right_block_context.conditionally_referenced_variable_ids.iter().copied());
 
-    let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
-    if block_context.flags.inside_conditional() {
-        block_context.assigned_variable_ids = left_block_context.assigned_variable_ids;
-        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids);
-    }
+    let right_assigned_var_ids = std::mem::take(&mut right_block_context.assigned_variable_ids);
+    block_context
+        .assigned_variable_ids
+        .extend(left_block_context.assigned_variable_ids.iter().map(|(id, offset)| (*id, *offset)));
+    block_context.assigned_variable_ids.extend(right_assigned_var_ids.iter().map(|(id, offset)| (*id, *offset)));
 
     // Propagate clause invalidations from both sides, plus restore pre-existing
     // ones, so parent expressions know which variables had their narrowing voided.
@@ -298,38 +379,125 @@ where
             && right_block_context.stable_method_call_assertions.contains_key(method_call)
     });
 
-    if let Some(if_body_context) = &block_context.if_body_context {
+    if let Some(if_body_context) = &block_context.if_body_context
+        && !block_context.flags.inside_negation()
+    {
         let mut if_body_context_inner = if_body_context.borrow_mut();
 
-        if block_context.flags.inside_negation() {
-            block_context.locals = left_block_context.locals;
-        } else {
-            block_context.locals = right_block_context.locals;
+        if_body_context_inner.locals.extend(right_block_context.locals.iter().map(|(k, v)| (*k, Rc::clone(v))));
+        if_body_context_inner
+            .conditionally_referenced_variable_ids
+            .extend(block_context.conditionally_referenced_variable_ids.iter().copied());
+        if_body_context_inner
+            .assigned_variable_ids
+            .extend(block_context.assigned_variable_ids.iter().map(|(k, v)| (*k, *v)));
+        if_body_context_inner.reconciled_expression_clauses.extend(partitioned_clauses.1);
+        if_body_context_inner.stable_method_calls.clone_from(&block_context.stable_method_calls);
+        if_body_context_inner
+            .stable_method_call_assertions
+            .retain(|method_call, _| block_context.stable_method_call_assertions.contains_key(method_call));
+    }
 
-            if_body_context_inner.locals.extend(block_context.locals.iter().map(|(k, v)| (*k, Rc::clone(v))));
-            if_body_context_inner
-                .conditionally_referenced_variable_ids
-                .extend(block_context.conditionally_referenced_variable_ids.iter().copied());
-            if_body_context_inner
-                .assigned_variable_ids
-                .extend(block_context.assigned_variable_ids.iter().map(|(k, v)| (*k, *v)));
-            if_body_context_inner.reconciled_expression_clauses.extend(partitioned_clauses.1);
-            if_body_context_inner.stable_method_calls.clone_from(&block_context.stable_method_calls);
-            if_body_context_inner
-                .stable_method_call_assertions
-                .retain(|method_call, _| block_context.stable_method_call_assertions.contains_key(method_call));
+    if block_context.if_body_context.is_some()
+        && left_block_context.assigned_variable_ids.is_empty()
+        && right_assigned_var_ids.is_empty()
+    {
+        block_context.locals =
+            if block_context.flags.inside_negation() { left_block_context.locals } else { right_block_context.locals };
+        artifacts.short_circuit_assignment_types.remove(&(binary.start_offset(), binary.end_offset()));
+
+        return Ok(());
+    }
+
+    block_context
+        .locals
+        .extend(left_block_context.locals.iter().map(|(var_id, var_type)| (*var_id, Rc::clone(var_type))));
+
+    let has_right_assignments =
+        right_assigned_var_ids.keys().any(|var_id| right_block_context.locals.contains_key(var_id));
+
+    if has_right_assignments {
+        let left_clauses = get_formula(
+            binary.lhs.span(),
+            binary.lhs.span(),
+            binary.lhs,
+            context.get_assertion_context_from_block(&left_block_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        )
+        .unwrap_or_default();
+
+        if !left_clauses.is_empty() {
+            let negated_left_clauses = negate_or_synthesize(
+                &left_clauses,
+                binary.lhs,
+                context.get_assertion_context_from_block(block_context),
+                artifacts,
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            );
+            let left_clauses_for_falsy_analysis = saturate_shared_clauses(
+                block_context.clauses.iter().cloned().chain(negated_left_clauses.into_iter().map(Rc::new)),
+                &context.settings.algebra_thresholds(),
+            );
+            let mut falsy_referenced_var_ids = WordSet::default();
+            let (negated_left_type_assertions, active_negated_left_type_assertions) = find_satisfying_assignments_iter(
+                left_clauses_for_falsy_analysis.iter().map(Rc::as_ref),
+                Some(binary.lhs.span()),
+                &mut falsy_referenced_var_ids,
+            );
+
+            if !negated_left_type_assertions.is_empty() {
+                let mut changed_var_ids = WordSet::default();
+                reconciler::reconcile_keyed_types(
+                    context,
+                    &negated_left_type_assertions,
+                    active_negated_left_type_assertions,
+                    &mut left_block_context,
+                    &mut changed_var_ids,
+                    &falsy_referenced_var_ids,
+                    &binary.lhs.span(),
+                    false,
+                    false,
+                );
+            }
         }
-    } else {
-        let left_locals = left_block_context.locals;
-        block_context.locals.extend(left_locals.iter().map(|(var_id, var_type)| (*var_id, Rc::clone(var_type))));
 
         merge_short_circuited_assignments(
             context,
             block_context,
-            &left_locals,
+            &left_block_context.locals,
             &right_block_context.locals,
             &right_assigned_var_ids,
         );
+
+        let assignment_types = ShortCircuitAssignmentTypes {
+            when_true: right_assigned_var_ids
+                .keys()
+                .filter_map(|id| right_block_context.locals.get(id).map(|ty| (*id, Rc::clone(ty))))
+                .collect(),
+            when_false: get_short_circuit_branch_types(
+                binary,
+                false,
+                context,
+                artifacts,
+                &left_block_context.locals,
+                &right_block_context,
+                &right_assigned_var_ids,
+            ),
+        };
+
+        if block_context.flags.inside_negation()
+            && let Some(if_body_context) = &block_context.if_body_context
+        {
+            let mut if_body_context = if_body_context.borrow_mut();
+            if_body_context.locals.extend(assignment_types.when_false.iter().map(|(id, ty)| (*id, Rc::clone(ty))));
+        }
+
+        artifacts.short_circuit_assignment_types.insert((binary.start_offset(), binary.end_offset()), assignment_types);
+    } else {
+        artifacts.short_circuit_assignment_types.remove(&(binary.start_offset(), binary.end_offset()));
     }
 
     Ok(())
@@ -345,61 +513,26 @@ pub fn analyze_logical_or_operation<'ctx, 'arena, A>(
 where
     A: Arena,
 {
-    let mut left_block_context;
-    let mut left_referenced_var_ids;
-    let left_assigned_var_ids;
+    let false_context = block_context.logical_or_false_context.take();
+    let left_false_context = is_logical_or_operation(binary.lhs).then(|| Rc::new(RefCell::new(None)));
+    let pre_referenced_var_ids = std::mem::take(&mut block_context.conditionally_referenced_variable_ids);
+    let pre_assigned_var_ids = std::mem::take(&mut block_context.assigned_variable_ids);
+    let if_body_context = block_context.if_body_context.take();
+    let was_inside_conditional = block_context.flags.inside_conditional();
+    block_context.flags.set_inside_conditional(true);
+    block_context.logical_or_false_context.clone_from(&left_false_context);
 
-    if is_logical_or_operation(binary.lhs, 3) {
-        let pre_referenced_var_ids = block_context.conditionally_referenced_variable_ids.clone();
-        block_context.conditionally_referenced_variable_ids.clear();
+    binary.lhs.analyze(context, block_context, artifacts)?;
 
-        let pre_assigned_var_ids = block_context.assigned_variable_ids.clone();
+    block_context.logical_or_false_context = None;
+    block_context.flags.set_inside_conditional(was_inside_conditional);
+    block_context.if_body_context = if_body_context;
 
-        left_block_context = block_context.clone();
-        left_block_context.assigned_variable_ids.clear();
-
-        let tmp_if_body_block_context = left_block_context.if_body_context;
-        left_block_context.if_body_context = None;
-
-        binary.lhs.analyze(context, &mut left_block_context, artifacts)?;
-
-        left_block_context.if_body_context = tmp_if_body_block_context;
-
-        for var_id in &left_block_context.parent_conflicting_clause_variables {
-            block_context.remove_variable_from_conflicting_clauses(context, *var_id, None);
-        }
-
-        for (var_id, left_type) in &left_block_context.locals {
-            if let Some(context_type) = block_context.locals.get(var_id) {
-                let combined_type = combine_union_types_rc(
-                    context_type,
-                    left_type,
-                    context.codebase,
-                    context.settings.combiner_options(),
-                );
-
-                block_context.locals.insert(*var_id, combined_type);
-            } else if left_block_context.assigned_variable_ids.contains_key(var_id) {
-                block_context.locals.insert(*var_id, Rc::clone(left_type));
-            }
-        }
-
-        left_referenced_var_ids = left_block_context.conditionally_referenced_variable_ids.clone();
-        left_block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
-
-        left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
-        left_block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
-
-        left_referenced_var_ids.retain(|id| !left_assigned_var_ids.contains_key(id));
-    } else {
-        let mut if_scope = IfScope::default();
-
-        let if_conditional_scope =
-            conditional::analyze(context, block_context, artifacts, &mut if_scope, binary.lhs, false)?;
-
-        left_block_context = if_conditional_scope.if_body_context;
-        left_referenced_var_ids = if_conditional_scope.conditionally_referenced_variable_ids;
-    }
+    let mut left_referenced_var_ids = block_context.conditionally_referenced_variable_ids.clone();
+    left_referenced_var_ids.retain(|id| !block_context.assigned_variable_ids.contains_key(id));
+    block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
+    block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+    let mut left_block_context = block_context.clone();
 
     let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
         Some(lhs_type) => {
@@ -410,44 +543,52 @@ where
         None => Rc::new(get_mixed()),
     };
 
-    let left_clauses = get_formula(
-        binary.lhs.span(),
-        binary.lhs.span(),
-        binary.lhs,
-        context.get_assertion_context_from_block(block_context),
-        artifacts,
-        &context.settings.algebra_thresholds(),
-        context.settings.formula_size_threshold,
-    )
-    .unwrap_or_default();
+    let (mut right_block_context, clauses_for_right_analysis) =
+        if let Some(left_false_context) = left_false_context.and_then(|scope| scope.borrow_mut().take()) {
+            let clauses = left_false_context.clauses.clone();
+            (left_false_context, clauses)
+        } else {
+            let left_clauses = get_formula(
+                binary.lhs.span(),
+                binary.lhs.span(),
+                binary.lhs,
+                context.get_assertion_context_from_block(block_context),
+                artifacts,
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            )
+            .unwrap_or_default();
 
-    let mut negated_left_clauses = negate_or_synthesize(
-        left_clauses,
-        binary.lhs,
-        context.get_assertion_context_from_block(block_context),
-        artifacts,
-        &context.settings.algebra_thresholds(),
-        context.settings.formula_size_threshold,
-    );
+            let mut negated_left_clauses = negate_or_synthesize(
+                &left_clauses,
+                binary.lhs,
+                context.get_assertion_context_from_block(block_context),
+                artifacts,
+                &context.settings.algebra_thresholds(),
+                context.settings.formula_size_threshold,
+            );
 
-    if !left_block_context.reconciled_expression_clauses.is_empty() {
-        let left_reconciled_clauses_hashed =
-            left_block_context.reconciled_expression_clauses.iter().map(|v| &**v).collect::<HashSet<_>>();
+            if !left_block_context.reconciled_expression_clauses.is_empty() {
+                let left_reconciled_clauses_hashed =
+                    left_block_context.reconciled_expression_clauses.iter().map(|v| &**v).collect::<HashSet<_>>();
 
-        negated_left_clauses.retain(|c| !left_reconciled_clauses_hashed.contains(c));
+                negated_left_clauses.retain(|c| !left_reconciled_clauses_hashed.contains(c));
 
-        if negated_left_clauses.len() == 1 {
-            let first = &negated_left_clauses[0];
-            if first.wedge && first.possibilities.is_empty() {
-                negated_left_clauses = Vec::new();
+                if negated_left_clauses.len() == 1 {
+                    let first = &negated_left_clauses[0];
+                    if first.wedge && first.possibilities.is_empty() {
+                        negated_left_clauses = Vec::new();
+                    }
+                }
             }
-        }
-    }
 
-    let clauses_for_right_analysis = saturate_shared_clauses(
-        block_context.clauses.iter().cloned().chain(negated_left_clauses.into_iter().map(Rc::new)),
-        &context.settings.algebra_thresholds(),
-    );
+            let clauses_for_right_analysis = saturate_shared_clauses(
+                block_context.clauses.iter().cloned().chain(negated_left_clauses.into_iter().map(Rc::new)),
+                &context.settings.algebra_thresholds(),
+            );
+
+            (block_context.clone(), clauses_for_right_analysis)
+        };
 
     let (negated_type_assertions, active_negated_type_assertions) = find_satisfying_assignments_iter(
         clauses_for_right_analysis.iter().map(Rc::as_ref),
@@ -456,9 +597,11 @@ where
     );
 
     let mut changed_var_ids = WordSet::default();
-    let mut right_block_context = block_context.clone();
+    let mut right_assigned_var_ids = WordMap::default();
 
     let result_type: TUnion;
+    let right_false_context =
+        (false_context.is_some() && is_logical_or_operation(binary.rhs)).then(|| Rc::new(RefCell::new(None)));
 
     if lhs_type.is_always_truthy() {
         // true || x → true (no fix)
@@ -493,14 +636,15 @@ where
         let pre_referenced_var_ids = right_block_context.conditionally_referenced_variable_ids.clone();
         right_block_context.conditionally_referenced_variable_ids.clear();
 
-        let pre_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
-        right_block_context.assigned_variable_ids.clear();
+        let pre_assigned_var_ids = std::mem::take(&mut right_block_context.assigned_variable_ids);
 
         let tmp_if_body_context = right_block_context.if_body_context;
         right_block_context.if_body_context = None;
+        right_block_context.logical_or_false_context.clone_from(&right_false_context);
 
         binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
 
+        right_block_context.logical_or_false_context = None;
         right_block_context.if_body_context = tmp_if_body_context;
 
         let rhs_type = match artifacts.get_rc_expression_type(&binary.rhs).cloned() {
@@ -558,8 +702,11 @@ where
         let mut right_referenced_var_ids = right_block_context.conditionally_referenced_variable_ids.clone();
         right_block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
 
-        let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
-        right_block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
+        right_assigned_var_ids =
+            std::mem::replace(&mut right_block_context.assigned_variable_ids, pre_assigned_var_ids);
+        right_block_context
+            .assigned_variable_ids
+            .extend(right_assigned_var_ids.iter().map(|(id, offset)| (*id, *offset)));
 
         let right_clauses = get_formula(
             binary.rhs.span(),
@@ -574,7 +721,7 @@ where
 
         let mut clauses_for_right_analysis = BlockContext::remove_reconciled_clause_refs(
             &clauses_for_right_analysis,
-            &right_assigned_var_ids.into_keys().collect::<WordSet>(),
+            &right_assigned_var_ids.keys().copied().collect::<WordSet>(),
         )
         .0;
 
@@ -583,11 +730,21 @@ where
         let combined_right_clauses =
             saturate_shared_clauses(clauses_for_right_analysis, &context.settings.algebra_thresholds());
 
-        let (right_type_assertions, active_right_type_assertions) = find_satisfying_assignments_iter(
+        let (mut right_type_assertions, active_right_type_assertions) = find_satisfying_assignments_iter(
             combined_right_clauses.iter().map(Rc::as_ref),
             Some(binary.rhs.span()),
             &mut right_referenced_var_ids,
         );
+
+        right_type_assertions.retain(|var_id, assertions| {
+            if right_assigned_var_ids.contains_key(var_id) {
+                for conjunction in assertions.iter_mut() {
+                    conjunction.retain(|a| !matches!(a, Assertion::Truthy | Assertion::Falsy));
+                }
+                assertions.retain(|conjunction| !conjunction.is_empty());
+            }
+            !assertions.is_empty()
+        });
 
         if !right_type_assertions.is_empty() {
             let mut right_changed_var_ids = WordSet::default();
@@ -607,18 +764,14 @@ where
 
         block_context
             .conditionally_referenced_variable_ids
-            .extend(right_block_context.conditionally_referenced_variable_ids);
+            .extend(right_block_context.conditionally_referenced_variable_ids.iter().copied());
         block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids.clone());
     }
 
     if let Some(if_body_context) = &block_context.if_body_context {
         let mut if_body_context_inner = if_body_context.borrow_mut();
         for (var_id, right_type) in &right_block_context.locals {
-            if let Some(if_type) = if_body_context_inner.locals.get(var_id) {
-                let combined_type =
-                    combine_union_types_rc(right_type, if_type, context.codebase, context.settings.combiner_options());
-                if_body_context_inner.locals.insert(*var_id, combined_type);
-            } else if let Some(left_type) = left_block_context.locals.get(var_id) {
+            if let Some(left_type) = left_block_context.locals.get(var_id) {
                 if_body_context_inner.locals.insert(
                     *var_id,
                     combine_union_types_rc(
@@ -637,17 +790,123 @@ where
         if_body_context_inner
             .assigned_variable_ids
             .extend(block_context.assigned_variable_ids.iter().map(|(k, v)| (*k, *v)));
-    } else {
+    }
+
+    let has_right_assignments =
+        right_assigned_var_ids.keys().any(|var_id| right_block_context.locals.contains_key(var_id));
+
+    if has_right_assignments {
+        let left_clauses = get_formula(
+            binary.lhs.span(),
+            binary.lhs.span(),
+            binary.lhs,
+            context.get_assertion_context_from_block(&left_block_context),
+            artifacts,
+            &context.settings.algebra_thresholds(),
+            context.settings.formula_size_threshold,
+        )
+        .unwrap_or_default();
+
+        if !left_clauses.is_empty() {
+            let left_clauses_for_left_analysis = saturate_shared_clauses(
+                block_context.clauses.iter().cloned().chain(left_clauses.iter().cloned().map(Rc::new)),
+                &context.settings.algebra_thresholds(),
+            );
+
+            let mut left_referenced_var_ids_copy = left_referenced_var_ids.clone();
+            let (left_type_assertions, active_left_type_assertions) = find_satisfying_assignments_iter(
+                left_clauses_for_left_analysis.iter().map(Rc::as_ref),
+                Some(binary.lhs.span()),
+                &mut left_referenced_var_ids_copy,
+            );
+
+            if !left_type_assertions.is_empty() {
+                let mut changed_var_ids = WordSet::default();
+                reconciler::reconcile_keyed_types(
+                    context,
+                    &left_type_assertions,
+                    active_left_type_assertions,
+                    &mut left_block_context,
+                    &mut changed_var_ids,
+                    &left_referenced_var_ids,
+                    &binary.lhs.span(),
+                    false,
+                    false,
+                );
+            }
+        }
+
         merge_short_circuited_assignments(
             context,
             block_context,
             &left_block_context.locals,
             &right_block_context.locals,
-            &right_block_context.assigned_variable_ids,
+            &right_assigned_var_ids,
         );
+
+        let assignment_types = ShortCircuitAssignmentTypes {
+            when_true: get_short_circuit_branch_types(
+                binary,
+                true,
+                context,
+                artifacts,
+                &left_block_context.locals,
+                &right_block_context,
+                &right_assigned_var_ids,
+            ),
+            when_false: right_assigned_var_ids
+                .keys()
+                .filter_map(|id| right_block_context.locals.get(id).map(|ty| (*id, Rc::clone(ty))))
+                .collect(),
+        };
+
+        if let Some(if_body_context) = &block_context.if_body_context {
+            let mut if_body_context = if_body_context.borrow_mut();
+            if_body_context.locals.extend(assignment_types.when_true.iter().map(|(id, ty)| (*id, Rc::clone(ty))));
+        }
+
+        artifacts.short_circuit_assignment_types.insert((binary.start_offset(), binary.end_offset()), assignment_types);
+    } else {
+        artifacts.short_circuit_assignment_types.remove(&(binary.start_offset(), binary.end_offset()));
     }
 
     artifacts.set_expression_type(binary, result_type);
+
+    if let Some(false_context) = false_context {
+        let right_false_context =
+            if let Some(right_false_context) = right_false_context.and_then(|scope| scope.borrow_mut().take()) {
+                right_false_context
+            } else {
+                let right_clauses = get_formula(
+                    binary.rhs.span(),
+                    binary.rhs.span(),
+                    binary.rhs,
+                    context.get_assertion_context_from_block(&right_block_context),
+                    artifacts,
+                    &context.settings.algebra_thresholds(),
+                    context.settings.formula_size_threshold,
+                )
+                .unwrap_or_default();
+
+                let negated_right_clauses = negate_or_synthesize(
+                    &right_clauses,
+                    binary.rhs,
+                    context.get_assertion_context_from_block(&right_block_context),
+                    artifacts,
+                    &context.settings.algebra_thresholds(),
+                    context.settings.formula_size_threshold,
+                );
+
+                right_block_context.clauses = saturate_shared_clauses(
+                    right_block_context.clauses.iter().cloned().chain(negated_right_clauses.into_iter().map(Rc::new)),
+                    &context.settings.algebra_thresholds(),
+                );
+
+                right_block_context
+            };
+
+        *false_context.borrow_mut() = Some(right_false_context);
+    }
 
     Ok(())
 }
@@ -842,17 +1101,9 @@ fn report_redundant_logical_operation<'arena, A>(
 }
 
 #[inline]
-const fn is_logical_or_operation(expression: &Expression<'_>, max_nesting: usize) -> bool {
-    if max_nesting == 0 {
-        return true;
-    }
-
-    match expression {
-        Expression::Parenthesized(p) => is_logical_or_operation(p.expression, max_nesting),
-        Expression::Binary(b) => match b.operator {
-            BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => is_logical_or_operation(b.lhs, max_nesting - 1),
-            _ => false,
-        },
-        _ => false,
-    }
+const fn is_logical_or_operation(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression.unparenthesized(),
+        Expression::Binary(Binary { operator: BinaryOperator::Or(_) | BinaryOperator::LowOr(_), .. })
+    )
 }

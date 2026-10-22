@@ -166,6 +166,10 @@ where
         metadata.flags |= MetadataFlags::SUSPENDS_FIBER;
     }
 
+    if class_like_metadata.flags.forbids_named_arguments() {
+        metadata.flags |= MetadataFlags::NO_NAMED_ARGUMENTS;
+    }
+
     Some(metadata)
 }
 
@@ -429,7 +433,7 @@ fn scan_function_like_docblock<A>(
         }
     }
 
-    let mut type_context = metadata.type_resolution_context.clone().unwrap_or_default();
+    let mut type_context = metadata.type_resolution_context.take().unwrap_or_default();
     for tag in document.tags() {
         let TagValue::Template(template) = &tag.value else {
             continue;

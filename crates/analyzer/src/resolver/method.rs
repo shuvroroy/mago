@@ -1,5 +1,6 @@
 use foldhash::HashSet;
 use mago_allocator::Arena;
+use mago_bytes::BytesDisplay;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::identifier::method::MethodIdentifier;
@@ -37,6 +38,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::class_name::report_non_existent_class_like;
+use crate::resolver::property::report_redundant_nullsafe;
 use crate::resolver::selector::resolve_member_selector;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_method_name;
@@ -165,6 +167,7 @@ pub fn resolve_method_targets<'ctx, 'ast, 'arena, A>(
     object: &'ast Expression<'arena>,
     selector: &'ast ClassLikeMemberSelector<'arena>,
     is_null_safe: bool,
+    operator_span: Span,
     access_span: Span,
 ) -> Result<MethodResolutionResult, AnalysisError>
 where
@@ -194,6 +197,13 @@ where
     }
 
     if let Some(object_type) = artifacts.get_expression_type(object) {
+        let is_nullable = object_type.can_be_null() || object_type.possibly_undefined();
+        let is_all_null = object_type.is_null() || object_type.is_void();
+
+        if is_null_safe && !is_nullable && !is_all_null && !object_type.has_nullsafe_null() {
+            report_redundant_nullsafe(context, operator_span, object, object_type, true);
+        }
+
         let mut object_atomics = object_type.types.iter().collect::<Vec<_>>();
 
         while let Some(object_atomic) = object_atomics.pop() {
@@ -244,7 +254,7 @@ where
                         result.has_invalid_target = true;
                     }
 
-                    report_call_on_non_object(context, object_atomic, object.span(), selector.span());
+                    report_call_on_non_object(context, object_atomic, object.span(), selector);
                     continue;
                 }
             };
@@ -372,7 +382,7 @@ where
     } else {
         result.has_invalid_target = true;
         result.encountered_mixed = true;
-        report_call_on_non_object(context, &TAtomic::Mixed(TMixed::new()), object.span(), selector.span());
+        report_call_on_non_object(context, &TAtomic::Mixed(TMixed::new()), object.span(), selector);
     }
 
     for method_id in asserted_descendant_method_references {
@@ -873,16 +883,22 @@ fn report_call_on_non_object<A>(
     context: &mut Context<'_, '_, A>,
     atomic_type: &TAtomic,
     obj_span: Span,
-    selector_span: Span,
+    selector: &ClassLikeMemberSelector,
 ) where
     A: Arena,
 {
     let type_str = atomic_type.get_id();
+    let issue_msg = match selector {
+        ClassLikeMemberSelector::Identifier(id) => {
+            format!("Attempting to call method `{}()` on a non-object type (`{type_str}`).", BytesDisplay(id.value))
+        }
+        _ => format!("Attempting to access a method on a non-object type (`{type_str}`)."),
+    };
 
     context.collector.report_with_code(
         if atomic_type.is_mixed() { IssueCode::MixedMethodAccess } else { IssueCode::InvalidMethodAccess },
-        Issue::error(format!("Attempting to access a method on a non-object type (`{type_str}`)."))
-            .with_annotation(Annotation::primary(selector_span).with_message("Cannot call method here"))
+        Issue::error(issue_msg)
+            .with_annotation(Annotation::primary(selector.span()).with_message("Cannot call method here"))
             .with_annotation(
                 Annotation::secondary(obj_span).with_message(format!("This expression has type `{type_str}`")),
             ),
